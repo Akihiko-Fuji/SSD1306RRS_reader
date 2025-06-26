@@ -15,6 +15,10 @@ Raspberry PiとSSD1309/SSD1306 OLEDディスプレイ用の、日本語表示対
 
 ---
 
+## 🖼 スクリーンショット
+![demo](https://github.com/Akihiko-Fuji/SSD1306RRS_reader/blob/main/demo.jpg?raw=true)
+
+---
 ## 💻 動作環境
 
 - **Raspberry Pi** (Zero, 3, 4など)
@@ -74,11 +78,6 @@ python3 SSD1309_RSS.py
 - RSS_FEEDSリスト内で表示するRSSを編集・追加できます
 - 日本語フォントを差し替える場合はinitialize()関数内のパスを書き換えてください
 - スクロール速度・記事表示時間も定数で調整可能です
-
----
-
-## 🖼 スクリーンショット
-![demo](https://github.com/Akihiko-Fuji/SSD1306RRS_reader/blob/main/demo.jpg?raw=true)
 
 ---
 
