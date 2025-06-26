@@ -69,8 +69,9 @@ SCL (e.g.3)	SCL	I2C通信
 RSS_FEEDSリスト内で表示するRSSを編集・追加できます
 日本語フォントを差し替える場合はinitialize()関数内のパスを書き換えてください
 スクロール速度・記事表示時間も定数で調整可能です
+
 🖼 スクリーンショット
-demo
+![demo](https://github.com/Akihiko-Fuji/SSD1306RRS_reader/blob/main/demo.jpg?raw=true)
 
 ⚠️ 既知の課題
 一部のRSSで文字化けや説明テキストが正しく取得できないことがあります
