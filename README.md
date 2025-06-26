@@ -88,6 +88,6 @@ python3 SSD1309_RSS.py
 
 ---
 
-##👤 作者
+## 👤 作者
 - Akihiko Fuji
 - ご質問・不具合は [issues](https://github.com/Akihiko-Fuji/SSD1306RRS_reader/issues) まで
