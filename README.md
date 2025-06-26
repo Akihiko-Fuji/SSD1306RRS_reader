@@ -90,5 +90,5 @@ python3 SSD1309_RSS.py
 ---
 
 ##👤 作者
-- Akihiko Fujita
+- Akihiko Fuji
 - ご質問・不具合は issues まで
