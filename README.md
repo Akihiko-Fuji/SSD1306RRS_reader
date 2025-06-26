@@ -38,7 +38,7 @@ Raspberry PiとSSD1309/SSD1306 OLEDディスプレイ用の、日本語表示対
 2. プログラムのダウンロード
     ```sh
     git clone https://github.com/Akihiko-Fuji/SSD1306RRS_reader.git
-    cd ssd1309-jp-rss
+    cd SSD1306RRS_reader
     ```
 
 3. 日本語フォントファイル（例: JF-Dot-MPlusH12.ttfなど）をこのディレクトリにコピー  
