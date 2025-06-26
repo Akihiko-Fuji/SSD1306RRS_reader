@@ -61,12 +61,13 @@ python3 SSD1309_RSS.py
 ---
 
 ## 🔌 配線例
-Raspberry Pi	OLED	備考
-3.3V or 5V	VCC	
-GND	GND	
-SDA (e.g.2)	SDA	I2C通信
-SCL (e.g.3)	SCL	I2C通信
-ボタン用GPIOピン例: GPIO17（次記事）、GPIO27（前記事）、GPIO18（フィード切替）
+|Raspberry Pi	|OLED	|備考|
+|---|---|---|
+|3.3V |VCC	|プルアップ抵抗を利用する場合は3.3V接続をおこない、OLED側にキャパシタを追加してください  |
+|GND	|GND	|  |
+|SDA (e.g.2)	|SDA	|I2C通信,配線を伸ばす場合はVCCに2.2kΩのプルアップ抵抗を介して接続してください|
+|SCL (e.g.3)	|SCL	|I2C通信,配線を伸ばす場合はVCCに2.2kΩのプルアップ抵抗を介して接続してください|
+- ボタン用GPIOピン例: GPIO17（次記事）、GPIO27（前記事）、GPIO18（フィード切替）
 
 ---
 
