@@ -1,67 +1,83 @@
+# SSD1309/SSD1306 日本語RSSリーダー
 
-SSD1309/SSD1306 日本語RSSリーダー
+Raspberry PiとSSD1309/SSD1306 OLEDディスプレイ用の、日本語表示対応RSSニュースリーダーです。ボタン操作による記事・フィード切り替えや自動スクロール表示にも対応します。
 
-概要（Overview）
-Raspberry PiとSSD1309/SSD1306 OLEDディスプレイ向けの日本語RSSニュースリーダーです。<BR>
-ボタンによる記事・フィード切り替え、日本語フォント対応、記事テキストの自動スクロール表示など、多機能なコンパクトニュース端末を実現します。<BR>
+---
 
-主な機能（Features）
-複数RSSフィードからの最新ニュース自動取得・更新<BR>
-記事タイトル＆本文（説明）の日本語表示（フォント同梱/外部指定可能）<BR>
-記事テキストの自動横スクロール表示<BR>
-GPIOによるボタン操作：記事進む/戻る、フィード切替<BR>
-シンプルなOLED画面デザイン＆アニメーション効果<BR>
-定期自動RSS再取得
-安全な終了処理・エラー通知
+## 📌 主な機能
 
-動作環境（Requirements）
-Raspberry Pi（Zero, 3, 4などI2C・GPIOが使えるもの）
-SSD1309 または SSD1306 OLED（I2C版、解像度128x64/32等はコードで調整）
-Python3
+- 複数のRSSフィードを自動取得・定期更新
+- 日本語ニュースのタイトル＆本文表示（日本語フォント利用可能）
+- 記事本文の自動横スクロール表示
+- GPIOボタンによる「記事送り・戻し」「RSSフィード切替」
+- シンプルで見やすいOLED画面デザイン
+- 効果的なローディング／切替アニメーション付き
+- 安全終了（Ctrl+Cやkill時にディスプレイ・GPIOをクリーンアップ）
 
-必要なPythonライブラリ
- luma.oled
- feedparser
- pillow
- RPi.GPIO
+---
 
-インストール方法（Installation）
-必要なライブラリをインストール
-　pip3 install luma.oled feedparser pillow RPi.GPIO
-このリポジトリをクローン
-　git clone https://github.com/your-username/ssd1309-jp-rss
-　cd ssd1309-jp-rss
-　日本語フォントファイル（例：JF-Dot-MPlusH12.ttf等）を同じディレクトリに配置
-　config部でI2Cアドレスやピン番号、ディスプレイサイズを必要に応じて調整
+## 💻 動作環境
 
-使い方（Usage）
-・スクリプトを実行
- 　python3 SSD1309_RSS.py
-・起動時に自動でフィード取得＆表示開始
-・各物理ボタンで「記事送り／戻り」「RSSフィード切替」が可能
+- **Raspberry Pi** (Zero, 3, 4など)
+- **SSD1309またはSSD1306 OLED** (I2C接続, 推奨解像度: 128x64)
+- **Python 3**
+- 必要ライブラリ:
+    - `luma.oled`
+    - `feedparser`
+    - `pillow`
+    - `RPi.GPIO`
 
-配線例（Wiring Example）
-　I2C接続（VCC, GND, SDA, SCL）、配線を伸ばす場合は、プルアップ抵抗を設けてください。
-　GPIOピン割当（例：17, 27, 18）は物理ボタンに接続
+---
 
-フォントについて（Fonts）
-　JF-DotやM+ FONTSなど日本語ビットマップフォントを推奨
-　任意の.ttfファイル指定可
+## ⚡ インストール
 
-カスタマイズ方法（Customization）
-　登録するRSSフィードの編集
-　OELDサイズ（WIDTH, HEIGHT）の変更
-　フォント差し替え
-　スクロール速度や表示タイミングの調整
+1. 必要なライブラリのインストール
+    ```sh
+    pip3 install luma.oled feedparser pillow RPi.GPIO
+    ```
 
-既知の課題・TODO（Known Issues / TODO）
-　特定のRSSで説明文が出ない等のフォーマット例外
-　OLEDやボタン機種による誤動作のまれな発生
+2. プログラムのダウンロード
+    ```sh
+    git clone https://github.com/your-username/ssd1309-jp-rss.git
+    cd ssd1309-jp-rss
+    ```
 
+3. 日本語フォントファイル（例: JF-Dot-MPlusH12.ttfなど）をこのディレクトリにコピー  
+   ※他の.ttfファイルも指定可能です
 
-作者・連絡先（Author / Contact）
+4. 必要に応じ、ソースコード内のI2Cアドレス・ピン番号・解像度などを自分の環境に合わせて編集
+
+---
+
+## 🚀 使い方
+
+```sh
+python3 SSD1309_RSS.py
+```
+
+・起動後、OLEDに日本語ニュースがスクロール表示されます
+・物理ボタンで「記事送り／戻し」「フィード切替」が可能です
+
+🔌 配線例
+Raspberry Pi	OLED	備考
+3.3V or 5V	VCC	
+GND	GND	
+SDA (e.g.2)	SDA	I2C通信
+SCL (e.g.3)	SCL	I2C通信
+ボタン用GPIOピン例: GPIO17（次記事）、GPIO27（前記事）、GPIO18（フィード切替）
+📝 フィード・フォントのカスタマイズ
+RSS_FEEDSリスト内で表示するRSSを編集・追加できます
+日本語フォントを差し替える場合はinitialize()関数内のパスを書き換えてください
+スクロール速度・記事表示時間も定数で調整可能です
+🖼 スクリーンショット
+demo
+
+⚠️ 既知の課題
+一部のRSSで文字化けや説明テキストが正しく取得できないことがあります
+OLED表示やボタンの配線ミスにご注意ください
+📝 ライセンス
+MIT License
+
+👤 作者
 Akihiko Fujita
-issuesやpull requests歓迎
-スクリーンショット／動画（Screenshots / Video）
-
-
+ご質問・不具合は issues まで
