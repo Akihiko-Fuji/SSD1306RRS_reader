@@ -19,7 +19,7 @@ Raspberry PiとSSD1309/SSD1306 OLEDディスプレイ用の、日本語表示対
 
 - **Raspberry Pi** (Zero, 3, 4など)
 - **SSD1309またはSSD1306 OLED** (I2C接続, 推奨解像度: 128x64)
-- **Python 3**
+- **Python 3以降**
 - 必要ライブラリ:
     - `luma.oled`
     - `feedparser`
@@ -41,7 +41,7 @@ Raspberry PiとSSD1309/SSD1306 OLEDディスプレイ用の、日本語表示対
     cd SSD1306RRS_reader
     ```
 
-3. 日本語フォントファイル（例: JF-Dot-MPlusH12.ttfなど）をこのディレクトリにコピー  
+3. 日本語フォントファイル（例: JF-Dot-MPlusH12.ttfなど）をプログラムと同じディレクトリにコピー  
    ※他の.ttfファイルも指定可能です
 
 4. 必要に応じ、ソースコード内のI2Cアドレス・ピン番号・解像度などを自分の環境に合わせて編集
