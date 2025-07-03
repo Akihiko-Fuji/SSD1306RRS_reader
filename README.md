@@ -88,6 +88,12 @@ python3 SSD1309_RSS.py
 
 ---
 
+## 🔍 バージョンアップ履歴
+ver1.1 画面表示の開始終了タイマー機能追加、タイトルと時計の位置調整、アニメーション処理の変更、タイトルと本文の区切り位置の微調整
+ver1.0 リリース
+
+---
+
 ## 👤 作者
 - Akihiko Fuji
 - ご質問・不具合は [issues](https://github.com/Akihiko-Fuji/SSD1306RRS_reader/issues) まで
