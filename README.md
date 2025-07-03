@@ -25,6 +25,7 @@ Raspberry PiとSSD1309/SSD1306 OLEDディスプレイ用の、日本語表示対
 - **Raspberry Pi** (Zero, 3, 4など)
 - **SSD1309またはSSD1306 OLED** (I2C接続, 推奨解像度: 128x64)
 - **Python 3以降**
+- **12ptサイズの日本語ビットマップフォント**
 - 必要ライブラリ:
     - `luma.oled`
     - `feedparser`
