@@ -17,7 +17,7 @@ Raspberry PiとSSD1309/SSD1306 OLEDディスプレイ用の、日本語表示対
 ---
 
 ## 🖼 スクリーンショット
-![demo](https://github.com/Akihiko-Fuji/SSD1306RRS_reader/blob/main/demo.jpg?raw=true)
+![demo](https://github.com/Akihiko-Fuji/SSD1306RRS_reader/blob/main/demo.gif?raw=true)
 
 ---
 ## 💻 動作環境
