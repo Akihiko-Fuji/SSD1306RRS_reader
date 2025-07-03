@@ -4,13 +4,13 @@
 ###########################################################################
 # ファイル名    : SSD1309_RSS.py
 # 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
-# 作成者        : Akihiko Fuji
-# 更新日        : 2025/6/26
-# バージョン    : 1.0
+# 作成者        : Akihiko Fujita
+# 更新日        : 2025/7/3
+# バージョン    : 1.1
 #
 # 【コメント】
 # 本プログラムはRaspberry PiにI2C接続したSSD1309/SSD1306 OLED上で
-# おもに日本語RSSニュースを自動スクロール＆複数ソース切り替えで表示します。
+# おもに日本語RSSニュースを自動スクロール＆複数ソース切り替えで表示します
 #
 # 必要ライブラリ導入例:
 #   pip3 install luma.oled feedparser pillow RPi.GPIO
@@ -47,7 +47,7 @@ RSS_FEEDS = [
     {
         "title": "NHKニュース",
         "url": "https://www.nhk.or.jp/rss/news/cat0.xml",
-        "color": 1         # 予備（カラー対応なら使う）
+        "color": 1         # 予備（カラー対応なら使うが機能していない）
     },
     {
         "title": "日経テクノロジー",
@@ -56,7 +56,7 @@ RSS_FEEDS = [
     }
 ]
 RSS_UPDATE_INTERVAL = 300    # RSS再更新間隔[秒]
-CURRENT_FEED_INDEX = 0       # 表示対象フィードindex。切替ごとに加算
+CURRENT_FEED_INDEX = 0       # 表示対象フィードindex 切替ごとに加算
 
 SCROLL_SPEED = 2             # 説明文スクロール速度
 ARTICLE_DISPLAY_TIME = 25    # 記事毎自動進行間隔[秒]
@@ -81,14 +81,19 @@ SMALL_FONT = None
 # 描画・アニメ用
 loading_effect = 0           # ローディング進捗演出
 transition_effect = 0        # 記事・フィード切替のアニメframes残数
-transition_direction = 0     # アニメスライド方向（+1:右/-1:左）
+transition_direction = 1     # アニメスライド方向（+1:右/-1:左）
 
 display = None               # OLED displayインスタンス（luma.oled）
+
+# 画面表示タイマー(例: 8:15から 17:45まで表示) 必要に応じ変更
+# 05分など、値の頭に0を入れて時間を展開するとエラーになります注意
+DISPLAY_TIME_START = ( 8, 15)  # (hour, minute)
+DISPLAY_TIME_END   = (17, 45)  # (hour, minute)
 
 # ================= 初期化 ================================
 def initialize():
     """
-    日本語フォントやGPIOを初期化する関数。物理ボタンが無い場合も問題なく動作。
+    日本語フォントやGPIOを初期化する関数。物理ボタンが無い場合も問題なく動作
     """
     global FONT, TITLE_FONT, SMALL_FONT
     try:
@@ -98,11 +103,11 @@ def initialize():
         main_font_file  = os.path.join(font_dir, "JF-Dot-MPlusH12.ttf")
         small_font_file = os.path.join(font_dir, "JF-Dot-k6x8.ttf")
 
-        TITLE_FONT = ImageFont.truetype(title_font_file, 10)    # ヘッダー等
+        TITLE_FONT = ImageFont.truetype(title_font_file,10)     # ヘッダー等
         FONT       = ImageFont.truetype(main_font_file, 12)     # 本文等
         SMALL_FONT = ImageFont.truetype(small_font_file, 8)
     except Exception as e:
-        print(f"[フォント読み込みエラー] {e} （デフォルトフォント使用に切替）")
+        print(f"[Font loading error] {e} （Switch to default font use）")
         TITLE_FONT = ImageFont.load_default()
         FONT       = ImageFont.load_default()
         SMALL_FONT = ImageFont.load_default()
@@ -121,29 +126,29 @@ def initialize():
                               callback=lambda x: handle_button_press("PREV"), bouncetime=300)
         GPIO.add_event_detect(BUTTON_FEED, GPIO.FALLING,
                               callback=lambda x: handle_button_press("FEED"), bouncetime=300)
-        print("[GPIO] ボタン初期化完了")
+        print("[GPIO] Button initialization complete")
     except ImportError:
-        print("[GPIO] RPi.GPIOモジュールなし → 物理ボタン非対応モードで起動")
+        print("[GPIO] Without RPi.GPIO module → Starts in mode without physical button support")
     except Exception as e:
-        print(f"[GPIO] 初期化エラー: {e}")
+        print(f"[GPIO] initialization error: {e}")
 
 # ================= RSS取得・パース =======================
 def fetch_rss_feed():
     """
-    各RSSフィードを取得し、記事リストをnews_itemsに格納する。
+    各RSSフィードを取得し、記事リストをnews_itemsに格納する
     """
     global news_items, last_rss_update, loading_effect
-    print("RSSフィード取得中...")
+    print("RSS feed being acquired...")
     loading_effect = 10   # ローディング演出回数
 
     try:
         all_items = []
         for feed_info in RSS_FEEDS:
-            print(f"「{feed_info['title']}」フィード取得中...")
+            print(f"「{feed_info['title']}」acquire feeds...")
             feed = feedparser.parse(feed_info["url"])
             # 取得失敗時はスキップ
             if hasattr(feed, 'status') and feed.status != 200:
-                print(f"[RSSエラー] {feed_info['title']}: {feed.status}")
+                print(f"[RSS error] {feed_info['title']}: {feed.status}")
                 continue
             feed_items = []
             for entry in feed.entries[:10]:
@@ -161,20 +166,20 @@ def fetch_rss_feed():
                     'feed_index': RSS_FEEDS.index(feed_info)
                 })
             all_items.extend(feed_items)
-            print(f"  → {feed_info['title']} 記事数: {len(feed_items)}")
+            print(f"  → {feed_info['title']} Number of articles: {len(feed_items)}")
         # 全てnews_itemsにまとめる
         if all_items:
             news_items = {}
             for feed_idx in range(len(RSS_FEEDS)):
                 news_items[feed_idx] = [item for item in all_items if item['feed_index'] == feed_idx]
             last_rss_update = time.time()
-            print(f"--> 合計{len(all_items)}件取得")
+            print(f"--> Total {len(all_items)} acquisition")
             return True
         else:
-            print("[RSS] 記事なし")
+            print("[RSS] No article")
             return False
     except Exception as e:
-        print(f"[RSS] 取得エラー: {e}")
+        print(f"[RSS] Acquisition error: {e}")
         return False
 
 def update_rss_feed_thread():
@@ -188,7 +193,7 @@ def update_rss_feed_thread():
 # ================== 記事・フィード切替処理 ==================
 def switch_feed():
     """
-    フィード（RSSソース）を次に切り替える。記事も先頭に。
+    フィード（RSSソース）を次に切り替える。記事も先頭に
     """
     global CURRENT_FEED_INDEX, current_item_index, scroll_position
     global article_start_time, auto_scroll_paused, feed_switch_time
@@ -202,11 +207,11 @@ def switch_feed():
     auto_scroll_paused = True
     transition_effect = TRANSITION_FRAMES
     transition_direction = -1
-    print(f"[フィード切替] 現在: {RSS_FEEDS[CURRENT_FEED_INDEX]['title']}")
+    print(f"[feed changed] now: {RSS_FEEDS[CURRENT_FEED_INDEX]['title']}")
 
 def move_to_next_article():
     """
-    次の記事へ移動。記事末尾なら先頭へ戻る。
+    次の記事へ移動。記事末尾なら先頭へ戻る
     """
     global current_item_index, scroll_position, transition_effect, transition_direction
     global article_start_time, auto_scroll_paused
@@ -224,7 +229,7 @@ def move_to_next_article():
 
 def move_to_prev_article():
     """
-    前の記事へ移動。先頭なら末尾へループ。
+    前の記事へ移動。先頭なら末尾へループ
     """
     global current_item_index, scroll_position, transition_effect, transition_direction
     global article_start_time, auto_scroll_paused
@@ -255,7 +260,7 @@ def handle_button_press(button):
 # ================== 描画/表示用補助 ======================
 def get_text_width(text, font):
     """
-    指定フォントでのテキスト幅（ピクセル数）を返す。互換性処理あり。
+    指定フォントでのテキスト幅（ピクセル数）を返す。互換性処理あり
     """
     try:
         return font.getlength(text)
@@ -271,7 +276,7 @@ def get_text_width(text, font):
 
 def update_scroll_position():
     """
-    記事テキストの自動スクロール進行処理。途中PUSHで進行/停止可。
+    記事テキストの自動スクロール進行処理。途中PUSHで進行/停止可
     """
     global scroll_position, article_start_time, auto_scroll_paused
     if not news_items or transition_effect > 0 or CURRENT_FEED_INDEX not in news_items:
@@ -301,7 +306,7 @@ def draw_article_content(draw, item, base_x, base_y, highlight_title=False):
     title_wrapped = textwrap.wrap(title, width=20)
     y_pos = base_y
 
-    # タイトル2行まで自動折返
+    # タイトル 2行まで自動折返
     for i, line in enumerate(title_wrapped[:2]):
         if highlight_title:
             title_width = get_text_width(line, FONT)
@@ -314,8 +319,8 @@ def draw_article_content(draw, item, base_x, base_y, highlight_title=False):
             draw.text((base_x, y_pos), line, font=FONT, fill=1)
         y_pos += 12
     y_pos = base_y + (24 if len(title_wrapped) >= 2 else 12)
-    draw.line([(base_x, y_pos), (base_x + WIDTH - 4, y_pos)], fill=1)
-    y_pos += 2
+    draw.line([(base_x, y_pos +1), (base_x + WIDTH - 4, y_pos +1)], fill=1)
+    y_pos += 2 #本文と説明文の間のバーの位置
 
     # 説明文（横スクロールエリア）
     desc_background_height = 14
@@ -349,8 +354,8 @@ def draw_rss_screen():
     current_feed = RSS_FEEDS[CURRENT_FEED_INDEX]['title']
     draw.text((2, 1), current_feed, font=TITLE_FONT, fill=0)       # フィード名
     current_time = time.strftime("%H:%M")
-    time_width = get_text_width(current_time, FONT)
-    draw.text((WIDTH - time_width - 3, 2), current_time, font=FONT, fill=0)
+    time_width = get_text_width(current_time, TITLE_FONT)
+    draw.text((WIDTH - time_width - 3, 1), current_time, font=TITLE_FONT, fill=0)
     draw.line([(0, header_height), (WIDTH, header_height)], fill=1)
     content_y = header_height + 2
 
@@ -361,13 +366,21 @@ def draw_rss_screen():
         if loading_effect % 2 == 0:
             msg_width = get_text_width(message, FONT)
             draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=FONT, fill=1)
-        # シンプルなアニメーションバー
-        anim_pos = (loading_effect % 5) * 20
-        draw.rectangle((anim_pos, HEIGHT - 8, anim_pos + 10, HEIGHT - 2), fill=1)
+
+        # 読み出しアニメーション演出（例: 波が流れるようなバー）
+        bar_count = 20
+        segment_width = 6
+        for i in range(bar_count):
+            segment_x = ((loading_effect + i) % (WIDTH // segment_width)) * segment_width
+            fill_val = 1 if i == 0 else 0  # 先頭だけ塗る場合
+            # でも「全部白」でもOK、iごとに遅延して流れる波に見せる
+            draw.rectangle(
+                (segment_x, HEIGHT - 8, segment_x + segment_width - 2, HEIGHT - 2), fill=1
+            )
 
     # 記事・フィード切替演出（スライド、フェード等）
     elif transition_effect > 0:
-        transition_effect -= 1
+        transition_effect -= 1.5 #切替速度、数字が大きいほど切替が早い
         progress = transition_effect / TRANSITION_FRAMES
         offset = int(WIDTH * progress * transition_direction)
         if news_items and CURRENT_FEED_INDEX in news_items and news_items[CURRENT_FEED_INDEX]:
@@ -401,7 +414,7 @@ def luma_signal_handler(sig, frame):
     """
     終了時のGPIOクリーンアップとOLED消灯処理
     """
-    print("\n[INFO] プログラムを終了します")
+    print("\n[INFO] Exit Program.")
     try:
         import RPi.GPIO as GPIO
         GPIO.cleanup()
@@ -415,12 +428,21 @@ def luma_signal_handler(sig, frame):
             pass
     sys.exit(0)
 
+# ================== 表示時間タイマ ======================
+def is_display_time():
+    """設定した(時,分)で表示タイムウィンドウを判定"""
+    now = time.localtime()
+    now_hm = now.tm_hour * 60 + now.tm_min
+    start_hm = DISPLAY_TIME_START[0] * 60 + DISPLAY_TIME_START[1]
+    end_hm   = DISPLAY_TIME_END[0] * 60 + DISPLAY_TIME_END[1]
+    return start_hm <= now_hm < end_hm
+
 # ================== メインエントリ ======================
 def main():
     global display, article_start_time, feed_switch_time
     initialize()
     if not fetch_rss_feed():
-        print("[RSS] 初回取得に失敗、再試行します...")
+        print("[RSS] First attempt to retrieve failed, retry...")
     article_start_time = time.time()
     feed_switch_time = time.time() - 10       # 初回はすぐfeed通知を消すようオフセット
 
@@ -436,9 +458,10 @@ def main():
         display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT, rotate=0)
         display.contrast(0xFF)      # 初期化時のみ明るさ最大に
         display.clear()
-        print("[OLED] luma.oled/SSD1309初期化完了")
+        print("[OLED] luma.oled/SSD1309 Initialization complete")
+
     except Exception as e:
-        print(f"[OLED] 初期化エラー: {e}")
+        print(f"[OLED] luma.oled/SSD1309 Initialization error: {e}")
         sys.exit(1)
 
     # 終了時の安全処理(Ctrl+C, kill等)
@@ -448,6 +471,7 @@ def main():
     # メインループ
     last_update_time = time.time()
     update_interval = 0.1    # update周期[秒]
+
     try:
         while True:
             current_time = time.time()
@@ -457,12 +481,25 @@ def main():
                 display.display(image)
                 last_update_time = current_time
             time.sleep(0.01)                    # 高負荷防止
+
+            if not is_display_time():           # タイマー表示機能
+                # OLEDをクリア又は「時間外」と表示
+                blank = Image.new("1", (WIDTH, HEIGHT))
+                draw = ImageDraw.Draw(blank)
+                msg = " "                       #表示休止中などの文字をいれると、状態がわかりやすいが非表示
+                msg_width = get_text_width(msg, FONT)
+                draw.text(((WIDTH - msg_width)//2, HEIGHT//2-8), msg, font=FONT, fill=1)
+                display.display(blank)
+                time.sleep(30)
+                last_update_time = time.time()  # 時計が戻った時即復帰できるよう
+                continue
+
     except KeyboardInterrupt:
         luma_signal_handler(None, None)
+
     except Exception as e:
-        print(f"[致命的エラー] {e}")
+        print(f"[fatal error] {e}")
         luma_signal_handler(None, None)
 
 if __name__ == "__main__":
     main()
-
