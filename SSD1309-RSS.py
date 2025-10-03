@@ -50,7 +50,7 @@ RSS_FEEDS = [
         "color": 1,  # 予備（カラー対応なら使うが機能していない）
     },
     {
-        "title": "NHKニュース 科学医療",
+        "title": "NHKニュース 科学",
         "url": "https://news.web.nhk/n-data/conf/na/rss/cat3.xml",
         "color": 1,
     },
@@ -657,3 +657,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
