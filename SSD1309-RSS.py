@@ -5,7 +5,7 @@
 # ファイル名    : SSD1309_RSS.py
 # 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 # 作成者        : Akihiko Fujita
-# 更新日        : 2025/9/8
+# 更新日        : 2025/10/3
 # バージョン    : 1.2
 #
 # 【コメント】
@@ -33,7 +33,7 @@ from PIL import Image, ImageDraw, ImageFont
 from luma.core.interface.serial import i2c
 from luma.oled.device import ssd1309  # SSD1306を使う場合はここを ssd1306 に変更
 
-# ====【ディスプレイ/ピン・各種設定】===================================
+# ディスプレイ/ピン・各種設定
 WIDTH = 128  # OLEDディスプレイ 幅
 HEIGHT = 64  # OLEDディスプレイ 高さ
 
@@ -46,8 +46,28 @@ BUTTON_FEED = 18  # フィードを切り替え
 RSS_FEEDS = [
     {
         "title": "NHKニュース",
-        "url": "https://www.nhk.or.jp/rss/news/cat0.xml",
+        "url": "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",
         "color": 1,  # 予備（カラー対応なら使うが機能していない）
+    },
+    {
+        "title": "NHKニュース 科学医療",
+        "url": "https://news.web.nhk/n-data/conf/na/rss/cat3.xml",
+        "color": 1,
+    },
+    {
+        "title": "NHKニュース 政治",
+        "url": "https://news.web.nhk/n-data/conf/na/rss/cat4.xml",
+        "color": 1,
+    },
+    {
+        "title": "NHKニュース 経済",
+        "url": "https://news.web.nhk/n-data/conf/na/rss/cat5.xml",
+        "color": 1,
+    },
+    {
+        "title": "NHKニュース 国際",
+        "url": "https://news.web.nhk/n-data/conf/na/rss/cat6.xml",
+        "color": 1,
     },
     {
         "title": "日経テクノロジー",
@@ -55,15 +75,17 @@ RSS_FEEDS = [
         "color": 1,
     },
 ]
-RSS_UPDATE_INTERVAL = 300  # RSS再更新間隔[秒]
-CURRENT_FEED_INDEX = 0  # 表示対象フィードindex 切替ごとに加算
+RSS_UPDATE_INTERVAL = 1800 # RSS再更新間隔[秒] 30分へ延長
+CURRENT_FEED_INDEX = 0 # 表示対象フィードindex 切替ごとに加算
+FEED_SWITCH_INTERVAL = 600  # フィード自動切替間隔[秒]（10分）
+last_feed_switch_time = 0   # 直近のフィード自動切替時刻
 
 SCROLL_SPEED = 2  # 説明文スクロール速度
 ARTICLE_DISPLAY_TIME = 25  # 記事毎自動進行間隔[秒]
 PAUSE_AT_START = 3.0  # 各記事表示開始でスクロール一時停止[秒]
 TRANSITION_FRAMES = 15  # フィード・記事切替アニメーションのフレーム数
 
-# ====【グローバル変数（状態管理）】====================================
+# ====【グローバル変数（状態管理）】
 news_items = {}  # フィードごとに記事リストを保持
 current_item_index = 0  # 現在の表示記事インデックス
 scroll_position = 0  # スクロール位置
@@ -91,7 +113,7 @@ DISPLAY_TIME_START = (8, 15)  # (hour, minute)
 DISPLAY_TIME_END = (17, 45)  # (hour, minute)
 
 
-# ================= 初期化 ================================
+# 初期化
 def initialize():
     """
     日本語フォントやGPIOを初期化する関数。物理ボタンが無い場合も問題なく動作
@@ -149,7 +171,7 @@ def initialize():
         print(f"[GPIO] initialization error: {e}")
 
 
-# ================= RSS取得・パース =======================
+# RSS取得・パース
 def fetch_rss_feed():
     """
     各RSSフィードを取得し、記事リストをnews_itemsに格納する
@@ -209,6 +231,7 @@ def fetch_rss_feed():
         return False
 
 
+# 定期的にRSSを自動更新するサブスレッド
 def update_rss_feed_thread():
     """
     定期的にRSSを自動更新するサブスレッド
@@ -218,7 +241,7 @@ def update_rss_feed_thread():
         time.sleep(RSS_UPDATE_INTERVAL)
 
 
-# ================== 記事・フィード切替処理 ==================
+#  記事・フィード切替処理 
 def switch_feed():
     """
     フィード（RSSソース）を次に切り替える。記事も先頭に
@@ -238,6 +261,7 @@ def switch_feed():
     print(f"[feed changed] now: {RSS_FEEDS[CURRENT_FEED_INDEX]['title']}")
 
 
+# 次の記事へ移動。記事末尾なら先頭へ戻る
 def move_to_next_article():
     """
     次の記事へ移動。記事末尾なら先頭へ戻る
@@ -261,6 +285,7 @@ def move_to_next_article():
     auto_scroll_paused = True
 
 
+# 前の記事へ移動。先頭なら末尾へループ
 def move_to_prev_article():
     """
     前の記事へ移動。先頭なら末尾へループ
@@ -284,20 +309,21 @@ def move_to_prev_article():
     auto_scroll_paused = True
 
 
-# ================== GPIOボタン操作 =======================
+#  GPIOボタン操作 
 def handle_button_press(button):
     """
     ボタン押下種別に応じて、記事・フィード切替処理を呼び出す
     """
+    # フィード切替は自動化したため、物理ボタンからの切替は無効化
+    if button == "FEED":
+        return
     if button == "NEXT":
         move_to_next_article()
     elif button == "PREV":
         move_to_prev_article()
-    elif button == "FEED":
-        switch_feed()
 
 
-# ================== 描画/表示用補助 ======================
+#  描画/表示用補助 
 def get_text_width(text, font):
     """
     指定フォントでのテキスト幅（ピクセル数）を返す。互換性処理あり
@@ -315,11 +341,13 @@ def get_text_width(text, font):
             return bbox[2] - bbox[0]
 
 
+# 記事テキストの自動スクロール進行処理。途中PUSHで進行/停止可
 def update_scroll_position():
     """
     記事テキストの自動スクロール進行処理。途中PUSHで進行/停止可
     """
     global scroll_position, article_start_time, auto_scroll_paused
+
     if not news_items or transition_effect > 0 or CURRENT_FEED_INDEX not in news_items:
         return
     if not news_items[CURRENT_FEED_INDEX]:
@@ -331,17 +359,24 @@ def update_scroll_position():
         if elapsed_time >= PAUSE_AT_START:
             auto_scroll_paused = False
     else:
+        # 説明文取得・整形
+        desc = item["description"].replace("\n", " ").strip()
+        desc_width = get_text_width(desc, FONT) if desc else 0
+        # 短文（スクロール不要）の場合は ARTICLE_DISPLAY_TIME 経過まで待機
+        if desc_width <= (WIDTH - 4):
+            if elapsed_time >= ARTICLE_DISPLAY_TIME:
+                move_to_next_article()
+            return
+
+        # 長文スクロール
         scroll_position += SCROLL_SPEED
-        desc = item["description"]
-        desc_width = get_text_width(desc, FONT)
-        # 説明文の全幅＋一画面スクロール or 一定秒で次記事
-        if (scroll_position > desc_width + WIDTH) or (
-            elapsed_time >= ARTICLE_DISPLAY_TIME
-        ):
+        # 末尾判定：テキスト幅＋画面幅＋余白(px) までスクロールしたら次記事へ
+        tail_margin_px = 24
+        if scroll_position > (desc_width + WIDTH + tail_margin_px):
             move_to_next_article()
 
 
-# ================== 描画本体 ========================
+#  描画本体
 def draw_article_content(draw, item, base_x, base_y, highlight_title=False):
     """
     記事のタイトル+説明文ブロックを表示
@@ -378,6 +413,7 @@ def draw_article_content(draw, item, base_x, base_y, highlight_title=False):
     return y_pos + desc_background_height
 
 
+# フィード切替時に中央に大きくフィード名を一時表示
 def draw_feed_notification(draw, feed_name):
     """
     フィード切替時に中央に大きくフィード名を一時表示
@@ -389,6 +425,7 @@ def draw_feed_notification(draw, feed_name):
     )
 
 
+# 画面全体を生成して返す描画メイン部
 def draw_rss_screen():
     """
     画面全体を生成して返す描画メイン部
@@ -478,7 +515,7 @@ def draw_rss_screen():
     return image
 
 
-# ================== 安全な終了処理 ======================
+# 安全な終了処理
 def luma_signal_handler(sig, frame):
     """
     終了時のGPIOクリーンアップとOLED消灯処理
@@ -499,7 +536,7 @@ def luma_signal_handler(sig, frame):
     sys.exit(0)
 
 
-# ================== 表示時間タイマ ======================
+# 表示時間タイマ
 def is_display_time():
     """設定した(時,分)で表示タイムウィンドウを判定"""
     now = time.localtime()
@@ -509,14 +546,18 @@ def is_display_time():
     return start_hm <= now_hm < end_hm
 
 
-# ================== メインエントリ ======================
+# メインエントリ
 def main():
     global display, article_start_time, feed_switch_time
     initialize()
     if not fetch_rss_feed():
         print("[RSS] First attempt to retrieve failed, retry...")
+
     article_start_time = time.time()
     feed_switch_time = time.time() - 10  # 初回はすぐfeed通知を消すようオフセット
+
+    # 自動切替タイミング初期化
+    last_feed_switch_time = time.time()
 
     # RSS更新スレッド起動
     feed_thread = threading.Thread(target=update_rss_feed_thread, daemon=True)
@@ -548,11 +589,24 @@ def main():
         while True:
             current_time = time.time()
             if current_time - last_update_time >= update_interval:
-                update_scroll_position()  # スクロール進行
-                image = draw_rss_screen()  # 画面描画
+                update_scroll_position()
+                image = draw_rss_screen()
                 display.display(image)
                 last_update_time = current_time
-            time.sleep(0.01)  # 高負荷防止
+
+            time.sleep(0.01)
+
+            # フィード自動切替（10分ごと）
+            try:
+                if time.time() - last_feed_switch_time >= FEED_SWITCH_INTERVAL:
+                    switch_feed()
+                    # 切替後の状態初期化
+                    article_start_time = time.time()
+                    scroll_position = 0
+                    auto_scroll_paused = True
+                    last_feed_switch_time = time.time()
+            except Exception as e:
+                print(f"[AUTO FEED] switch error: {e}")
 
             if not is_display_time():  # タイマー表示機能
                 # OLEDをクリア又は「時間外」と表示
