@@ -6,7 +6,7 @@
 # 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 # 作成者        : Akihiko Fujita
 # 更新日        : 2025/10/3
-# バージョン    : 1.2
+# バージョン    : 1.3
 #
 # 【コメント】
 # 本プログラムはRaspberry PiにI2C接続したSSD1309/SSD1306 OLED上で
@@ -34,13 +34,13 @@ from luma.core.interface.serial import i2c
 from luma.oled.device import ssd1309  # SSD1306を使う場合はここを ssd1306 に変更
 
 # ディスプレイ/ピン・各種設定
-WIDTH = 128  # OLEDディスプレイ 幅
-HEIGHT = 64  # OLEDディスプレイ 高さ
+WIDTH = 128                 # OLEDディスプレイ 幅
+HEIGHT = 64                 # OLEDディスプレイ 高さ
 
 # GPIOピン番号 (BCM)
-BUTTON_NEXT = 17  # 次の記事へ進む
-BUTTON_PREV = 27  # 前の記事へ戻る
-BUTTON_FEED = 18  # フィードを切り替え
+BUTTON_NEXT = 17            # 次の記事へ進む
+BUTTON_PREV = 27            # 前の記事へ戻る
+BUTTON_FEED = 18            # フィードを切り替え
 
 # RSSフィードリスト。お好みで増減可能
 RSS_FEEDS = [
@@ -75,25 +75,35 @@ RSS_FEEDS = [
         "color": 1,
     },
 ]
-RSS_UPDATE_INTERVAL = 1800 # RSS再更新間隔[秒] 30分へ延長
-CURRENT_FEED_INDEX = 0 # 表示対象フィードindex 切替ごとに加算
+RSS_UPDATE_INTERVAL = 1800  # RSS再更新間隔[秒] 30分へ延長
+CURRENT_FEED_INDEX = 0      # 表示対象フィードindex 切替ごとに加算
 FEED_SWITCH_INTERVAL = 600  # フィード自動切替間隔[秒]（10分）
 last_feed_switch_time = 0   # 直近のフィード自動切替時刻
 
 SCROLL_SPEED = 2  # 説明文スクロール速度
-ARTICLE_DISPLAY_TIME = 25  # 記事毎自動進行間隔[秒]
-PAUSE_AT_START = 3.0  # 各記事表示開始でスクロール一時停止[秒]
-TRANSITION_FRAMES = 15  # フィード・記事切替アニメーションのフレーム数
+ARTICLE_DISPLAY_TIME = 25   # 記事毎自動進行間隔[秒]
+PAUSE_AT_START = 3.0        # 各記事表示開始でスクロール一時停止[秒]
+TRANSITION_FRAMES = 15      # フィード・記事切替アニメーションのフレーム数
 
 # ====【グローバル変数（状態管理）】
-news_items = {}  # フィードごとに記事リストを保持
-current_item_index = 0  # 現在の表示記事インデックス
-scroll_position = 0  # スクロール位置
-last_rss_update = 0  # 最終RSS更新時刻
-article_start_time = 0  # 現在記事の表示開始時刻
-auto_scroll_paused = True  # 一時停止フラグ
-feed_view_active = False  # フィード切替表示中フラグ
-feed_switch_time = 0  # フィード切替発動時刻
+news_items = {}             # フィードごとに記事リストを保持
+current_item_index = 0      # 現在の表示記事インデックス
+scroll_position = 0         # スクロール位置
+last_rss_update = 0         # 最終RSS更新時刻
+article_start_time = 0      # 現在記事の表示開始時刻
+auto_scroll_paused = True   # 一時停止フラグ
+feed_view_active = False    # フィード切替表示中フラグ
+feed_switch_time = 0        # フィード切替発動時刻
+
+# ==== グローバル設定 ====
+USE_SPI = False             # True = SPI接続, False = I2C接続
+
+# SPI用ピン定義（必要に応じて調整）
+SPI_PORT = 0
+SPI_DEVICE = 0
+SPI_GPIO_DC = 24
+SPI_GPIO_RST = 25
+SPI_GPIO_CS = 8
 
 # フォント
 FONT = None
@@ -101,16 +111,16 @@ TITLE_FONT = None
 SMALL_FONT = None
 
 # 描画・アニメ用
-loading_effect = 0  # ローディング進捗演出
-transition_effect = 0  # 記事・フィード切替のアニメframes残数
-transition_direction = 1  # アニメスライド方向（+1:右/-1:左）
+loading_effect = 0           # ローディング進捗演出
+transition_effect = 0        # 記事・フィード切替のアニメframes残数
+transition_direction = 1     # アニメスライド方向（+1:右/-1:左）
 
-display = None  # OLED displayインスタンス（luma.oled）
+display = None               # OLED displayインスタンス（luma.oled）
 
 # 画面表示タイマー(例: 8:15から 17:45まで表示) 必要に応じ変更
 # 05分など、値の頭に0を入れて時間を展開するとエラーになります注意
 DISPLAY_TIME_START = (8, 15)  # (hour, minute)
-DISPLAY_TIME_END = (17, 45)  # (hour, minute)
+DISPLAY_TIME_END = (17, 45)   # (hour, minute)
 
 
 # 初期化
@@ -565,17 +575,32 @@ def main():
 
     # OLED初期化
     try:
-        serial = i2c(port=1, address=0x3C)
-        # ssd1309を使う場合。ssd1306の場合は行を修正
+        if USE_SPI:
+            from luma.core.interface.serial import spi
+            serial = spi(
+                port=SPI_PORT,
+                device=SPI_DEVICE,
+                gpio_DC=SPI_GPIO_DC,
+                gpio_RST=SPI_GPIO_RST,
+                gpio_CS=SPI_GPIO_CS,
+                bus_speed_hz=8000000  # 必要に応じ調整
+            )
+            print("[OLED] SPI mode selected")
+        else:
+            from luma.core.interface.serial import i2c
+            serial = i2c(port=1, address=0x3C)
+            print("[OLED] I2C mode selected")
+
         global display
         display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT, rotate=0)
         display.contrast(0xFF)  # 初期化時のみ明るさ最大に
         display.clear()
-        print("[OLED] luma.oled/SSD1309 Initialization complete")
+        print("[OLED] SSD1309 Initialization complete")
 
     except Exception as e:
-        print(f"[OLED] luma.oled/SSD1309 Initialization error: {e}")
+        print(f"[OLED] Initialization error: {e}")
         sys.exit(1)
+
 
     # 終了時の安全処理(Ctrl+C, kill等)
     signal.signal(signal.SIGINT, luma_signal_handler)
