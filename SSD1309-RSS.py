@@ -5,7 +5,7 @@
 SSD1309/SSD1306 OLED RSSリーダー (I2C/SPI両対応)
 ファイル名    : SSD1309_RSS.py
 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
-作成者        : Akihiko Fujita
+作成者        : Akihiko Fuji
 更新日        : 2025/10/9
 バージョン    : 1.5
 ------------------------------------------------
@@ -604,3 +604,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
