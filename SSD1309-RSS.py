@@ -53,9 +53,6 @@ RSS_FEEDS = [
     {"title": "NHKニュース 政治", "url": "https://news.web.nhk/n-data/conf/na/rss/cat4.xml",       "color": 1},
     {"title": "NHKニュース 経済", "url": "https://news.web.nhk/n-data/conf/na/rss/cat5.xml",       "color": 1},
     {"title": "NHKニュース 国際", "url": "https://news.web.nhk/n-data/conf/na/rss/cat6.xml",       "color": 1},
-    {"title": "日経テクノロジー", "url": "https://assets.wor.jp/rss/rdf/nikkei/technology.rdf",    "color": 1},
-    {"title": "Bリーグ[RELEASE]", "url": "https://www.bleague.jp/files/topics/rss/category24.rdf", "color": 1},
-    {"title": "Bリーグ [GAME]"  , "url": "https://www.bleague.jp/files/topics/rss/category9.rdf",  "color": 1},
 ]
 
 # 画面表示時間の設定 8:30 - 18:00 のみ利用するとしている
@@ -604,6 +601,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
