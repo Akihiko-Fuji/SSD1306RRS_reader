@@ -37,7 +37,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # luma.oled
 from luma.core.interface.serial import i2c
-from luma.oled.device import ssd1309  # ssd1306 に変更可
+from luma.oled.device import ssd1309  # ssd1306 を利用する場合は変更
 
 # 液晶解像度設定
 WIDTH = 128
@@ -179,14 +179,14 @@ class RSSReaderApp:
             if USE_SPI:
                 from luma.core.interface.serial import spi
                 serial = spi(device=0, port=0, gpio_DC=24, gpio_RST=25)
-                self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT)
+                self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT) # ssd1306 を利用する場合は変更
                 self.log.info("OLED initialized (SPI mode)")
 
             # I2Cモード
             else:
                 from luma.core.interface.serial import i2c
-                serial = i2c(port=1, address=0x3C)
-                self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT)
+                serial = i2c(port=1, address=0x3C) # アドレスが異なる場合は変更
+                self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT) # ssd1306 を利用する場合は変更
                 self.log.info("OLED initialized (I2C mode)")
 
             self.display.contrast(0xFF)
@@ -604,5 +604,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
