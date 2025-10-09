@@ -182,7 +182,7 @@ class RSSReaderApp:
             # I2Cモード
             else:
                 from luma.core.interface.serial import i2c
-                serial = i2c(port=1, address=0x3C) # アドレスが異なる場合は変更
+                serial = i2c(port=1, address=0x3C) # アドレスが異なる場合は sudo i2cdetect -y 1 で確認し変更してください
                 self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT) # ssd1306 を利用する場合は変更
                 self.log.info("OLED initialized (I2C mode)")
 
@@ -410,7 +410,7 @@ class RSSReaderApp:
             self.article_start_time = time.time()
             self.auto_scroll_paused = True
 
-    # 前の記事へ（呼び出し無し）
+    # 前の記事へ（関数の呼び出しが掛かってないので、必要に応じてGPIOボタンなどに割り当てるなどをしてください）
     def move_to_prev_article(self):
         with self._state_lock:
             if not self.news_items or self.current_feed_index not in self.news_items or not self.news_items[self.current_feed_index]:
@@ -425,7 +425,7 @@ class RSSReaderApp:
             self.article_start_time = time.time()
             self.auto_scroll_paused = True
 
-    # 説明文スクロール位置を更新する。
+    # 説明文スクロール位置を更新する
     def update_scroll_position(self):
         """
         自動スクロールが有効な場合のみ self.scroll_position を増加させる。
@@ -446,7 +446,7 @@ class RSSReaderApp:
             if self.auto_scroll_paused:
                 if elapsed_time >= self.PAUSE_AT_START:
                     self.auto_scroll_paused = False
-                return  # 停止中はここで抜ける
+                return
 
             # 説明文の幅を計測
             desc = item["description"].replace("\n", " ").strip()
@@ -460,18 +460,18 @@ class RSSReaderApp:
                 else:
                     return
 
-        # ロック外で状態遷移（短文の場合のみ）
+        # ロック外で状態遷移、短文の場合のみ
         if desc_width <= (WIDTH - 4):
             self.move_to_next_article()
             return
 
-        # 長文スクロールの更新（ロック下で位置のみ進める）
+        # 長文スクロールの更新、ロック下で位置のみ進める
         with self._state_lock:
             self.scroll_position += self.SCROLL_SPEED
             tail_margin_px = 24
             reached_tail = (self.scroll_position > (desc_width + WIDTH + tail_margin_px))
 
-        # 末尾に達したらロック外で次記事へ（※ここが重要：条件成立時のみ呼ぶ）
+        # 末尾に達したらロック外で次記事へ
         if reached_tail:
             self.move_to_next_article()
 
@@ -535,9 +535,9 @@ class RSSReaderApp:
         sys.exit(0)
 
 # 5) メインループ
-    # メインループ（タイマー一元管理）
+    # メインループ
     def run(self):
-        # 初回RSSフェッチ（リトライ内蔵）
+        # 初回RSSフェッチ、リトライ込み
         if not self.fetch_rss_feed():
             self.log.warning("First RSS fetch failed after retries")
 
@@ -601,7 +601,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
