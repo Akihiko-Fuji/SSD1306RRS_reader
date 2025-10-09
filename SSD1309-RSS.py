@@ -5,8 +5,8 @@
 # ファイル名    : SSD1309_RSS.py
 # 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 # 作成者        : Akihiko Fujita
-# 更新日        : 2025/10/3
-# バージョン    : 1.3
+# 更新日        : 2025/10/9
+# バージョン    : 1.4
 #
 # 【コメント】
 # 本プログラムはRaspberry PiにI2C接続したSSD1309/SSD1306 OLED上で
@@ -74,13 +74,36 @@ RSS_FEEDS = [
         "url": "https://assets.wor.jp/rss/rdf/nikkei/technology.rdf",
         "color": 1,
     },
+    {
+        "title": "Bリーグ [RELEASE]",
+        "url": "https://www.bleague.jp/files/topics/rss/category24.rdf",
+        "color": 1,
+    },
+    {
+        "title": "Bリーグ [GAME]",
+        "url": "https://www.bleague.jp/files/topics/rss/category9.rdf",
+        "color": 1,
+    },
+    {
+        "title": "Bリーグ [選手]",
+        "url": "https://www.bleague.jp/files/topics/rss/category149.rdf",
+        "color": 1,
+    },
+    {
+        "title": "Bリーグ [B mag]",
+        "url": "https://www.bleague.jp/files/topics/rss/group54.rdf",
+        "color": 1,
+    },
+
+
+
 ]
 RSS_UPDATE_INTERVAL = 1800  # RSS再更新間隔[秒] 30分へ延長
 CURRENT_FEED_INDEX = 0      # 表示対象フィードindex 切替ごとに加算
 FEED_SWITCH_INTERVAL = 600  # フィード自動切替間隔[秒]（10分）
 last_feed_switch_time = 0   # 直近のフィード自動切替時刻
 
-SCROLL_SPEED = 2  # 説明文スクロール速度
+SCROLL_SPEED = 4            # 説明文スクロール速度
 ARTICLE_DISPLAY_TIME = 25   # 記事毎自動進行間隔[秒]
 PAUSE_AT_START = 3.0        # 各記事表示開始でスクロール一時停止[秒]
 TRANSITION_FRAMES = 15      # フィード・記事切替アニメーションのフレーム数
@@ -113,7 +136,7 @@ SMALL_FONT = None
 # 描画・アニメ用
 loading_effect = 0           # ローディング進捗演出
 transition_effect = 0        # 記事・フィード切替のアニメframes残数
-transition_direction = 1     # アニメスライド方向（+1:右/-1:左）
+transition_direction = -1    # アニメスライド方向（+1:右/-1:左）
 
 display = None               # OLED displayインスタンス（luma.oled）
 
@@ -121,6 +144,12 @@ display = None               # OLED displayインスタンス（luma.oled）
 # 05分など、値の頭に0を入れて時間を展開するとエラーになります注意
 DISPLAY_TIME_START = (8, 15)  # (hour, minute)
 DISPLAY_TIME_END = (17, 45)   # (hour, minute)
+
+
+# --- シングル／ダブルクリック検知付きボタン処理 ---
+click_timer = None
+click_count = 0
+click_lock = threading.Lock()
 
 
 # 初期化
@@ -133,50 +162,32 @@ def initialize():
         # フォントファイルの絶対パス参照
         font_dir = os.path.dirname(os.path.abspath(__file__))
         title_font_file = os.path.join(font_dir, "JF-Dot-MPlusH10.ttf")
-        main_font_file = os.path.join(font_dir, "JF-Dot-MPlusH12.ttf")
+        main_font_file = os.path.join(font_dir,  "JF-Dot-MPlusH12.ttf")
         small_font_file = os.path.join(font_dir, "JF-Dot-k6x8.ttf")
 
         TITLE_FONT = ImageFont.truetype(title_font_file, 10)  # ヘッダー等
-        FONT = ImageFont.truetype(main_font_file, 12)  # 本文等
+        FONT = ImageFont.truetype(main_font_file, 12)         # 本文等
         SMALL_FONT = ImageFont.truetype(small_font_file, 8)
+
     except Exception as e:
         print(f"[Font loading error] {e} （Switch to default font use）")
         TITLE_FONT = ImageFont.load_default()
         FONT = ImageFont.load_default()
         SMALL_FONT = ImageFont.load_default()
 
-    # GPIOの初期化
+    # ---- GPIO初期化 ----
     try:
         import RPi.GPIO as GPIO
-
+        GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
-        GPIO.setup(BUTTON_NEXT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(BUTTON_PREV, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(BUTTON_FEED, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        print("[GPIO] Single-button polling mode initialized")
 
-        GPIO.add_event_detect(
-            BUTTON_NEXT,
-            GPIO.FALLING,
-            callback=lambda x: handle_button_press("NEXT"),
-            bouncetime=300,
-        )
-        GPIO.add_event_detect(
-            BUTTON_PREV,
-            GPIO.FALLING,
-            callback=lambda x: handle_button_press("PREV"),
-            bouncetime=300,
-        )
-        GPIO.add_event_detect(
-            BUTTON_FEED,
-            GPIO.FALLING,
-            callback=lambda x: handle_button_press("FEED"),
-            bouncetime=300,
-        )
-        print("[GPIO] Button initialization complete")
+        # 監視スレッド起動
+        t = threading.Thread(target=gpio_polling_thread, daemon=True)
+        t.start()
     except ImportError:
-        print(
-            "[GPIO] Without RPi.GPIO module → Starts in mode without physical button support"
-        )
+        print("[GPIO] Without RPi.GPIO module → software-only mode")
     except Exception as e:
         print(f"[GPIO] initialization error: {e}")
 
@@ -322,15 +333,48 @@ def move_to_prev_article():
 #  GPIOボタン操作 
 def handle_button_press(button):
     """
-    ボタン押下種別に応じて、記事・フィード切替処理を呼び出す
+    GPIO18ボタンで:
+      - シングルクリック: 次の記事へ
+      - ダブルクリック: フィード切替
     """
-    # フィード切替は自動化したため、物理ボタンからの切替は無効化
-    if button == "FEED":
-        return
-    if button == "NEXT":
-        move_to_next_article()
-    elif button == "PREV":
-        move_to_prev_article()
+    global click_timer, click_count
+    global auto_scroll_paused
+
+    print(f"[DEBUG] handle_button_press called: button={button}")
+
+    # ボタンチャタリング防止・クリック判定同期
+    with click_lock:
+        click_count += 1
+
+        def decide_click_action():
+            global click_count, click_timer
+            with click_lock:
+                if click_count == 1:
+                    # シングルクリック判定
+                    move_to_next_article()
+                    auto_scroll_paused = True
+                    print("[GPIO] Single click → Next article")
+                elif click_count >= 2:
+                    # ダブルクリック判定
+                    switch_feed()
+                    auto_scroll_paused = True
+                    print("[GPIO] Double click → Feed switched")
+
+                click_count = 0
+                click_timer = None
+
+        # クリック間隔閾値（秒）: 0.6秒以内ならダブルクリック
+        DOUBLE_CLICK_INTERVAL = 0.6
+
+        if click_timer is not None:
+            # 2回目クリック → ダブルクリック成立
+            if click_timer.is_alive():
+                click_timer.cancel()
+                decide_click_action()
+        else:
+            # 初回クリック → タイマー開始
+            click_timer = threading.Timer(DOUBLE_CLICK_INTERVAL, decide_click_action)
+            click_timer.start()
 
 
 #  描画/表示用補助 
@@ -556,6 +600,47 @@ def is_display_time():
     return start_hm <= now_hm < end_hm
 
 
+# ポーリング検知
+def gpio_polling_thread():
+    """
+    GPIO18の状態をポーリングしてクリック／ダブルクリックを検知する。
+    割り込み競合がない安全な方式。
+    """
+    import RPi.GPIO as GPIO
+    prev_state = GPIO.input(BUTTON_FEED)
+    last_press_time = 0
+    click_count = 0
+    DOUBLE_CLICK_INTERVAL = 0.4  # 秒
+    LONG_PRESS_THRESHOLD = 1.5   # 将来拡張用（長押し判定）
+
+    print("[GPIO] Polling thread started")
+
+    while True:
+        state = GPIO.input(BUTTON_FEED)
+        now = time.time()
+
+        # 押下検知（HIGH→LOW）
+        if prev_state == GPIO.HIGH and state == GPIO.LOW:
+            if now - last_press_time <= DOUBLE_CLICK_INTERVAL:
+                click_count += 1
+            else:
+                click_count = 1
+            last_press_time = now
+
+        # 押下完了後に一定時間経過してから動作判定
+        if click_count > 0 and (now - last_press_time) > DOUBLE_CLICK_INTERVAL:
+            if click_count == 1:
+                move_to_next_article()
+                print("[GPIO] Single click → Next article")
+            elif click_count >= 2:
+                switch_feed()
+                print("[GPIO] Double click → Feed switched")
+            click_count = 0
+
+        prev_state = state
+        time.sleep(0.02)  # 50Hz（CPU負荷軽い）
+
+
 # メインエントリ
 def main():
     global display, article_start_time, feed_switch_time
@@ -601,6 +686,20 @@ def main():
         print(f"[OLED] Initialization error: {e}")
         sys.exit(1)
 
+    # OLED初期化完了後にボタンイベント登録（競合回避）
+    try:
+        import RPi.GPIO as GPIO
+        GPIO.remove_event_detect(BUTTON_FEED)
+        GPIO.add_event_detect(
+            BUTTON_FEED,
+            GPIO.FALLING,
+            callback=lambda x: handle_button_press("FEED"),
+            bouncetime=400,
+        )
+        print("[GPIO] Event detection added after OLED init")
+
+    except Exception as e:
+        print(f"[GPIO] post-init event detect error: {e}")
 
     # 終了時の安全処理(Ctrl+C, kill等)
     signal.signal(signal.SIGINT, luma_signal_handler)
@@ -657,4 +756,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
