@@ -1,757 +1,610 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-###########################################################################
-# ファイル名    : SSD1309_RSS.py
-# 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
-# 作成者        : Akihiko Fujita
-# 更新日        : 2025/10/9
-# バージョン    : 1.4
-#
-# 【コメント】
-# 本プログラムはRaspberry PiにI2C接続したSSD1309/SSD1306 OLED上で
-# おもに日本語RSSニュースを自動スクロール＆複数ソース切り替えで表示します
-#
-# 必要ライブラリ導入例:
-#   pip3 install luma.oled feedparser pillow RPi.GPIO
-#
-# 日本語表示のためフォント（例：JF-Dot）を同一フォルダに設置してください
-# また、幅・高さ（WIDTH, HEIGHT）はご自分のOLEDサイズに合わせてください
-###########################################################################
+"""
+SSD1309/SSD1306 OLED RSSリーダー (I2C/SPI両対応)
+ファイル名    : SSD1309_RSS.py
+概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
+作成者        : Akihiko Fujita
+更新日        : 2025/10/9
+バージョン    : 1.5
+------------------------------------------------
+Raspberry Pi + luma.oled環境で動作する日本語対応RSSビューワー。
+複数RSSソースを巡回し、記事を自動スクロール表示します。
 
-import time
+ - I2C/SPI 接続を USE_SPI 変数で切り替え可能
+ - GPIOボタンによる記事送り、ダブルクリックでフィード切替
+ - 日本語表示のためフォント（例：JF-Dot）を同一フォルダに設置してください
+
+必要ライブラリ:
+    pip3 install luma.oled feedparser pillow RPi.GPIO
+"""
+
 import os
 import sys
+import time
 import threading
+import signal
+import logging
+import logging.handlers
+import socket
 import re
 import textwrap
+from typing import Dict, List, Any, Optional
+
 import feedparser
-import signal
 from PIL import Image, ImageDraw, ImageFont
 
-# luma.oledライブラリ
+# luma.oled
 from luma.core.interface.serial import i2c
-from luma.oled.device import ssd1309  # SSD1306を使う場合はここを ssd1306 に変更
+from luma.oled.device import ssd1309  # ssd1306 に変更可
 
-# ディスプレイ/ピン・各種設定
-WIDTH = 128                 # OLEDディスプレイ 幅
-HEIGHT = 64                 # OLEDディスプレイ 高さ
+# 液晶解像度設定
+WIDTH = 128
+HEIGHT = 64
 
-# GPIOピン番号 (BCM)
-BUTTON_NEXT = 17            # 次の記事へ進む
-BUTTON_PREV = 27            # 前の記事へ戻る
-BUTTON_FEED = 18            # フィードを切り替え
+# 送りやフィードに利用するGPIOピン（BCM）
+BUTTON_FEED = 18
 
-# RSSフィードリスト。お好みで増減可能
+# RSSフィード 必要に応じて手動で増減させてください
 RSS_FEEDS = [
-    {
-        "title": "NHKニュース",
-        "url": "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",
-        "color": 1,  # 予備（カラー対応なら使うが機能していない）
-    },
-    {
-        "title": "NHKニュース 科学",
-        "url": "https://news.web.nhk/n-data/conf/na/rss/cat3.xml",
-        "color": 1,
-    },
-    {
-        "title": "NHKニュース 政治",
-        "url": "https://news.web.nhk/n-data/conf/na/rss/cat4.xml",
-        "color": 1,
-    },
-    {
-        "title": "NHKニュース 経済",
-        "url": "https://news.web.nhk/n-data/conf/na/rss/cat5.xml",
-        "color": 1,
-    },
-    {
-        "title": "NHKニュース 国際",
-        "url": "https://news.web.nhk/n-data/conf/na/rss/cat6.xml",
-        "color": 1,
-    },
-    {
-        "title": "日経テクノロジー",
-        "url": "https://assets.wor.jp/rss/rdf/nikkei/technology.rdf",
-        "color": 1,
-    },
-    {
-        "title": "Bリーグ [RELEASE]",
-        "url": "https://www.bleague.jp/files/topics/rss/category24.rdf",
-        "color": 1,
-    },
-    {
-        "title": "Bリーグ [GAME]",
-        "url": "https://www.bleague.jp/files/topics/rss/category9.rdf",
-        "color": 1,
-    },
-    {
-        "title": "Bリーグ [選手]",
-        "url": "https://www.bleague.jp/files/topics/rss/category149.rdf",
-        "color": 1,
-    },
-    {
-        "title": "Bリーグ [B mag]",
-        "url": "https://www.bleague.jp/files/topics/rss/group54.rdf",
-        "color": 1,
-    },
-
-
-
+    {"title": "NHKニュース", "url": "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",            "color": 1},
+    {"title": "NHKニュース 科学", "url": "https://news.web.nhk/n-data/conf/na/rss/cat3.xml",       "color": 1},
+    {"title": "NHKニュース 政治", "url": "https://news.web.nhk/n-data/conf/na/rss/cat4.xml",       "color": 1},
+    {"title": "NHKニュース 経済", "url": "https://news.web.nhk/n-data/conf/na/rss/cat5.xml",       "color": 1},
+    {"title": "NHKニュース 国際", "url": "https://news.web.nhk/n-data/conf/na/rss/cat6.xml",       "color": 1},
+    {"title": "日経テクノロジー", "url": "https://assets.wor.jp/rss/rdf/nikkei/technology.rdf",    "color": 1},
+    {"title": "Bリーグ[RELEASE]", "url": "https://www.bleague.jp/files/topics/rss/category24.rdf", "color": 1},
+    {"title": "Bリーグ [GAME]"  , "url": "https://www.bleague.jp/files/topics/rss/category9.rdf",  "color": 1},
 ]
-RSS_UPDATE_INTERVAL = 1800  # RSS再更新間隔[秒] 30分へ延長
-CURRENT_FEED_INDEX = 0      # 表示対象フィードindex 切替ごとに加算
-FEED_SWITCH_INTERVAL = 600  # フィード自動切替間隔[秒]（10分）
-last_feed_switch_time = 0   # 直近のフィード自動切替時刻
 
-SCROLL_SPEED = 4            # 説明文スクロール速度
-ARTICLE_DISPLAY_TIME = 25   # 記事毎自動進行間隔[秒]
-PAUSE_AT_START = 3.0        # 各記事表示開始でスクロール一時停止[秒]
-TRANSITION_FRAMES = 15      # フィード・記事切替アニメーションのフレーム数
+# 画面表示時間の設定 8:30 - 18:00 のみ利用するとしている
+DISPLAY_TIME_START = (8, 30)
+DISPLAY_TIME_END = (18, 0)
 
-# ====【グローバル変数（状態管理）】
-news_items = {}             # フィードごとに記事リストを保持
-current_item_index = 0      # 現在の表示記事インデックス
-scroll_position = 0         # スクロール位置
-last_rss_update = 0         # 最終RSS更新時刻
-article_start_time = 0      # 現在記事の表示開始時刻
-auto_scroll_paused = True   # 一時停止フラグ
-feed_view_active = False    # フィード切替表示中フラグ
-feed_switch_time = 0        # フィード切替発動時刻
+# SPI接続時はTrue / I2C接続時はFalse
+USE_SPI = False
 
-# ==== グローバル設定 ====
-USE_SPI = False             # True = SPI接続, False = I2C接続
-
-# SPI用ピン定義（必要に応じて調整）
-SPI_PORT = 0
-SPI_DEVICE = 0
-SPI_GPIO_DC = 24
-SPI_GPIO_RST = 25
-SPI_GPIO_CS = 8
-
-# フォント
-FONT = None
-TITLE_FONT = None
-SMALL_FONT = None
-
-# 描画・アニメ用
-loading_effect = 0           # ローディング進捗演出
-transition_effect = 0        # 記事・フィード切替のアニメframes残数
-transition_direction = -1    # アニメスライド方向（+1:右/-1:左）
-
-display = None               # OLED displayインスタンス（luma.oled）
-
-# 画面表示タイマー(例: 8:15から 17:45まで表示) 必要に応じ変更
-# 05分など、値の頭に0を入れて時間を展開するとエラーになります注意
-DISPLAY_TIME_START = (8, 15)  # (hour, minute)
-DISPLAY_TIME_END = (17, 45)   # (hour, minute)
+# ログ設定
+def setup_logging():
+    logger = logging.getLogger("rss_oled")
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    fmt = logging.Formatter("[%(levelname)s] %(asctime)s %(message)s")
+    handler.setFormatter(fmt)
+    logger.addHandler(handler)
+    return logger
 
 
-# --- シングル／ダブルクリック検知付きボタン処理 ---
-click_timer = None
-click_count = 0
-click_lock = threading.Lock()
+class RSSReaderApp:
+    # 主要変数と状態を初期化
+    def __init__(self):
+        # ロガー
+        self.log = setup_logging()
 
+        # 表示・描画
+        self.display = None
 
-# 初期化
-def initialize():
-    """
-    日本語フォントやGPIOを初期化する関数。物理ボタンが無い場合も問題なく動作
-    """
-    global FONT, TITLE_FONT, SMALL_FONT
-    try:
-        # フォントファイルの絶対パス参照
-        font_dir = os.path.dirname(os.path.abspath(__file__))
-        title_font_file = os.path.join(font_dir, "JF-Dot-MPlusH10.ttf")
-        main_font_file = os.path.join(font_dir,  "JF-Dot-MPlusH12.ttf")
-        small_font_file = os.path.join(font_dir, "JF-Dot-k6x8.ttf")
+        # フォント
+        self.TITLE_FONT = None
+        self.FONT = None
+        self.SMALL_FONT = None
 
-        TITLE_FONT = ImageFont.truetype(title_font_file, 10)  # ヘッダー等
-        FONT = ImageFont.truetype(main_font_file, 12)         # 本文等
-        SMALL_FONT = ImageFont.truetype(small_font_file, 8)
+        # 設定（変更しやすい値をクラス属性に集約）
+        self.RSS_UPDATE_INTERVAL = 1800  # 秒
+        self.FEED_SWITCH_INTERVAL = 600  # 秒
+        self.SCROLL_SPEED = 12
+        self.ARTICLE_DISPLAY_TIME = 25.0
+        self.PAUSE_AT_START = 3.0
+        self.TRANSITION_FRAMES = 15
+        self.GPIO_POLL_INTERVAL = 0.02  # 秒
+        self.MAIN_UPDATE_INTERVAL = 0.1  # 秒
+        self.DOUBLE_CLICK_INTERVAL = 0.6  # 秒
 
-    except Exception as e:
-        print(f"[Font loading error] {e} （Switch to default font use）")
-        TITLE_FONT = ImageFont.load_default()
-        FONT = ImageFont.load_default()
-        SMALL_FONT = ImageFont.load_default()
+        # 状態（可変）
+        self.news_items: Dict[int, List[Dict[str, Any]]] = {}
+        self.current_feed_index: int = 0
+        self.current_item_index: int = 0
+        self.scroll_position: int = 0
+        self.last_rss_update: float = 0.0
+        self.article_start_time: float = 0.0
+        self.auto_scroll_paused: bool = True
+        self.feed_switch_time: float = 0.0
+        self.loading_effect: int = 0
+        self.transition_effect: float = 0.0
+        self.transition_direction: int = 1
 
-    # ---- GPIO初期化 ----
-    try:
-        import RPi.GPIO as GPIO
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(BUTTON_FEED, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        print("[GPIO] Single-button polling mode initialized")
+        # スケジューラ／タイマー代替：メインループ内の時刻管理
+        self._last_main_update: float = 0.0
+        self._last_feed_switch_check: float = 0.0
 
-        # 監視スレッド起動
-        t = threading.Thread(target=gpio_polling_thread, daemon=True)
-        t.start()
-    except ImportError:
-        print("[GPIO] Without RPi.GPIO module → software-only mode")
-    except Exception as e:
-        print(f"[GPIO] initialization error: {e}")
+        # GPIO用
+        self._gpio_available = False
+        self._stop_event = threading.Event()
 
+        # クリック検出（ポーリング方式に統一）
+        self._prev_button_state = 1
+        self._last_press_time = 0.0
+        self._click_count = 0
 
-# RSS取得・パース
-def fetch_rss_feed():
-    """
-    各RSSフィードを取得し、記事リストをnews_itemsに格納する
-    """
-    global news_items, last_rss_update, loading_effect
-    print("RSS feed being acquired...")
-    loading_effect = 10  # ローディング演出回数
+        # ロック（必要最小限）
+        self._state_lock = threading.Lock()
 
-    try:
-        all_items = []
-        for feed_info in RSS_FEEDS:
-            print(f"「{feed_info['title']}」acquire feeds...")
-            feed = feedparser.parse(feed_info["url"])
-            # 取得失敗時はスキップ
-            if hasattr(feed, "status") and feed.status != 200:
-                print(f"[RSS error] {feed_info['title']}: {feed.status}")
-                continue
-            feed_items = []
-            for entry in feed.entries[:10]:
-                title = entry.title
-                desc = (
-                    entry.summary
-                    if hasattr(entry, "summary")
-                    else (entry.description if hasattr(entry, "description") else "")
-                )
-                desc = re.sub(r"<[^>]+>", "", desc)
-                feed_items.append(
-                    {
-                        "title": title,
-                        "description": desc,
-                        "published": entry.published
-                        if hasattr(entry, "published")
-                        else "",
-                        "link": entry.link,
-                        "feed_title": feed_info["title"],
-                        "feed_color": feed_info["color"],
-                        "feed_index": RSS_FEEDS.index(feed_info),
-                    }
-                )
-            all_items.extend(feed_items)
-            print(f"  → {feed_info['title']} Number of articles: {len(feed_items)}")
-        # 全てnews_itemsにまとめる
-        if all_items:
-            news_items = {}
-            for feed_idx in range(len(RSS_FEEDS)):
-                news_items[feed_idx] = [
-                    item for item in all_items if item["feed_index"] == feed_idx
-                ]
-            last_rss_update = time.time()
-            print(f"--> Total {len(all_items)} acquisition")
-            return True
-        else:
-            print("[RSS] No article")
-            return False
-    except Exception as e:
-        print(f"[RSS] Acquisition error: {e}")
+# 1) 初期化処理
+    # 初期化
+    def initialize(self):
+        self._init_fonts()
+        self._init_gpio()
+        self._init_display()
+        self._install_signal_handlers()
+        self.article_start_time = time.time()
+        self.feed_switch_time = time.time() - 10  # 初回通知オフセット
+        self._last_main_update = time.time()
+        self._last_feed_switch_check = time.time()
+
+    # 日本語フォントの呼び出し
+    def _init_fonts(self):
+        try:
+            font_dir = os.path.dirname(os.path.abspath(__file__))
+            title_font_file = os.path.join(font_dir, "JF-Dot-MPlusH10.ttf")
+            main_font_file = os.path.join(font_dir, "JF-Dot-MPlusH12.ttf")
+            small_font_file = os.path.join(font_dir, "JF-Dot-k6x8.ttf")
+            self.TITLE_FONT = ImageFont.truetype(title_font_file, 10)
+            self.FONT = ImageFont.truetype(main_font_file, 12)
+            self.SMALL_FONT = ImageFont.truetype(small_font_file, 8)
+            self.log.info("Fonts loaded")
+        except Exception as e:
+            self.log.warning(f"Font loading error: {e} -> using default fonts")
+            self.TITLE_FONT = ImageFont.load_default()
+            self.FONT = ImageFont.load_default()
+            self.SMALL_FONT = ImageFont.load_default()
+
+    # GPIO初期化およびボタンスレッド起動
+    def _init_gpio(self):
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(BUTTON_FEED, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            self._gpio_available = True
+
+            # ポーリングスレッド起動（統一）
+            t = threading.Thread(target=self._gpio_polling_thread, daemon=True)
+            t.start()
+            self.log.info("GPIO initialized (polling)")
+        except Exception as e:
+            self._gpio_available = False
+            self.log.info(f"GPIO not available, software-only mode: {e}")
+
+    # OLED初期化 (I2C/SPI切替対応)
+    def _init_display(self):
+        try:
+            # SPIモード
+            if USE_SPI:
+                from luma.core.interface.serial import spi
+                serial = spi(device=0, port=0, gpio_DC=24, gpio_RST=25)
+                self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT)
+                self.log.info("OLED initialized (SPI mode)")
+
+            # I2Cモード
+            else:
+                from luma.core.interface.serial import i2c
+                serial = i2c(port=1, address=0x3C)
+                self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT)
+                self.log.info("OLED initialized (I2C mode)")
+
+            self.display.contrast(0xFF)
+            self.display.clear()
+        except Exception as e:
+            self.log.error(f"OLED initialization failed: {e}")
+            raise
+
+    # SIGINT/SIGTERMの終了ハンドラを登録
+    def _install_signal_handlers(self):
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+# 2) RSS取得処理
+    # RSS取得（リトライ強化）
+    def fetch_rss_feed(self, max_retries: int = 3, base_delay: float = 2.0, timeout: float = 10.0) -> bool:
+        self.log.info("Fetching RSS feeds...")
+        self.loading_effect = 10
+        attempt = 0
+
+        while attempt <= max_retries:
+            try:
+                all_items: List[Dict[str, Any]] = []
+
+                # feedparser は内部でHTTPを行う。timeoutはグローバルに設定できないため、
+                # socket のデフォルトタイムアウトを一時的に設定
+                for idx, feed_info in enumerate(RSS_FEEDS):
+                    self.log.info(f"Fetching: {feed_info['title']}")
+                    prev_timeout = socket.getdefaulttimeout()
+                    socket.setdefaulttimeout(timeout)
+                    try:
+                        feed = feedparser.parse(feed_info["url"])
+                    finally:
+                        socket.setdefaulttimeout(prev_timeout)
+
+                    # HTTPステータス
+                    if hasattr(feed, "status") and feed.status != 200:
+                        raise ConnectionError(f"HTTP status {feed.status} for {feed_info['title']}")
+
+                    entries = getattr(feed, "entries", [])[:10]
+                    feed_items = []
+                    for entry in entries:
+                        title = getattr(entry, "title", "")
+                        desc = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
+                        desc = re.sub(r"<[^>]+>", "", desc)
+                        published = getattr(entry, "published", "")
+                        link = getattr(entry, "link", "")
+                        feed_items.append({
+                            "title": title,
+                            "description": desc,
+                            "published": published,
+                            "link": link,
+                            "feed_title": feed_info["title"],
+                            "feed_color": feed_info["color"],
+                            "feed_index": idx
+                        })
+                    self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
+                    all_items.extend(feed_items)
+
+                if all_items:
+                    grouped: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(len(RSS_FEEDS))}
+                    for item in all_items:
+                        grouped[item["feed_index"]].append(item)
+                    with self._state_lock:
+                        self.news_items = grouped
+                        self.last_rss_update = time.time()
+                    self.log.info(f"Total items: {len(all_items)}")
+                    return True
+                else:
+                    self.log.warning("No items fetched")
+                    return False
+
+            # ネットワーク系（タイムアウト、HTTPステータス不良）
+            except (socket.timeout, ConnectionError) as e:
+                self.log.warning(f"Network error: {e} (attempt {attempt+1}/{max_retries})")
+
+            # IOエラー（DNS解決障害、ソケット問題等も含む可能性）
+            except (OSError, IOError) as e:
+                self.log.warning(f"I/O error: {e} (attempt {attempt+1}/{max_retries})")
+            except Exception as e:
+                self.log.error(f"Unexpected error while fetching RSS: {e} (attempt {attempt+1}/{max_retries})")
+
+            attempt += 1
+            if attempt <= max_retries:
+                delay = base_delay * (2 ** (attempt - 1))  # 指数バックオフ
+                time.sleep(delay)
+
         return False
 
-
-# 定期的にRSSを自動更新するサブスレッド
-def update_rss_feed_thread():
-    """
-    定期的にRSSを自動更新するサブスレッド
-    """
-    while True:
-        fetch_rss_feed()
-        time.sleep(RSS_UPDATE_INTERVAL)
-
-
-#  記事・フィード切替処理 
-def switch_feed():
-    """
-    フィード（RSSソース）を次に切り替える。記事も先頭に
-    """
-    global CURRENT_FEED_INDEX, current_item_index, scroll_position
-    global article_start_time, auto_scroll_paused, feed_switch_time
-    global transition_effect, transition_direction
-
-    CURRENT_FEED_INDEX = (CURRENT_FEED_INDEX + 1) % len(RSS_FEEDS)
-    current_item_index = 0
-    scroll_position = 0
-    article_start_time = time.time()
-    feed_switch_time = time.time()
-    auto_scroll_paused = True
-    transition_effect = TRANSITION_FRAMES
-    transition_direction = -1
-    print(f"[feed changed] now: {RSS_FEEDS[CURRENT_FEED_INDEX]['title']}")
-
-
-# 次の記事へ移動。記事末尾なら先頭へ戻る
-def move_to_next_article():
-    """
-    次の記事へ移動。記事末尾なら先頭へ戻る
-    """
-    global current_item_index, scroll_position, transition_effect, transition_direction
-    global article_start_time, auto_scroll_paused
-    if (
-        not news_items
-        or CURRENT_FEED_INDEX not in news_items
-        or not news_items[CURRENT_FEED_INDEX]
-    ):
-        return
-    if current_item_index < len(news_items[CURRENT_FEED_INDEX]) - 1:
-        current_item_index += 1
-    else:
-        current_item_index = 0
-    scroll_position = 0
-    transition_effect = TRANSITION_FRAMES
-    transition_direction = -1
-    article_start_time = time.time()
-    auto_scroll_paused = True
-
-
-# 前の記事へ移動。先頭なら末尾へループ
-def move_to_prev_article():
-    """
-    前の記事へ移動。先頭なら末尾へループ
-    """
-    global current_item_index, scroll_position, transition_effect, transition_direction
-    global article_start_time, auto_scroll_paused
-    if (
-        not news_items
-        or CURRENT_FEED_INDEX not in news_items
-        or not news_items[CURRENT_FEED_INDEX]
-    ):
-        return
-    if current_item_index > 0:
-        current_item_index -= 1
-    else:
-        current_item_index = len(news_items[CURRENT_FEED_INDEX]) - 1
-    scroll_position = 0
-    transition_effect = TRANSITION_FRAMES
-    transition_direction = 1
-    article_start_time = time.time()
-    auto_scroll_paused = True
-
-
-#  GPIOボタン操作 
-def handle_button_press(button):
-    """
-    GPIO18ボタンで:
-      - シングルクリック: 次の記事へ
-      - ダブルクリック: フィード切替
-    """
-    global click_timer, click_count
-    global auto_scroll_paused
-
-    print(f"[DEBUG] handle_button_press called: button={button}")
-
-    # ボタンチャタリング防止・クリック判定同期
-    with click_lock:
-        click_count += 1
-
-        def decide_click_action():
-            global click_count, click_timer
-            with click_lock:
-                if click_count == 1:
-                    # シングルクリック判定
-                    move_to_next_article()
-                    auto_scroll_paused = True
-                    print("[GPIO] Single click → Next article")
-                elif click_count >= 2:
-                    # ダブルクリック判定
-                    switch_feed()
-                    auto_scroll_paused = True
-                    print("[GPIO] Double click → Feed switched")
-
-                click_count = 0
-                click_timer = None
-
-        # クリック間隔閾値（秒）: 0.6秒以内ならダブルクリック
-        DOUBLE_CLICK_INTERVAL = 0.6
-
-        if click_timer is not None:
-            # 2回目クリック → ダブルクリック成立
-            if click_timer.is_alive():
-                click_timer.cancel()
-                decide_click_action()
-        else:
-            # 初回クリック → タイマー開始
-            click_timer = threading.Timer(DOUBLE_CLICK_INTERVAL, decide_click_action)
-            click_timer.start()
-
-
-#  描画/表示用補助 
-def get_text_width(text, font):
-    """
-    指定フォントでのテキスト幅（ピクセル数）を返す。互換性処理あり
-    """
-    try:
-        return font.getlength(text)
-    except AttributeError:
+# 3) 描画・表示制御
+    # 画面描画ユーティリティ
+    def get_text_width(self, text: str, font: ImageFont.FreeTypeFont) -> int:
         try:
-            return font.getsize(text)[0]
+            return int(font.getlength(text))
         except AttributeError:
-            # Pillow旧バージョン互換
-            dummy_image = Image.new("1", (1, 1))
-            dummy_draw = ImageDraw.Draw(dummy_image)
-            bbox = dummy_draw.textbbox((0, 0), text, font=font)
-            return bbox[2] - bbox[0]
+            try:
+                return font.getsize(text)[0]
+            except AttributeError:
+                dummy_image = Image.new("1", (1, 1))
+                dummy_draw = ImageDraw.Draw(dummy_image)
+                bbox = dummy_draw.textbbox((0, 0), text, font=font)
+                return bbox[2] - bbox[0]
 
-
-# 記事テキストの自動スクロール進行処理。途中PUSHで進行/停止可
-def update_scroll_position():
-    """
-    記事テキストの自動スクロール進行処理。途中PUSHで進行/停止可
-    """
-    global scroll_position, article_start_time, auto_scroll_paused
-
-    if not news_items or transition_effect > 0 or CURRENT_FEED_INDEX not in news_items:
-        return
-    if not news_items[CURRENT_FEED_INDEX]:
-        return
-    item = news_items[CURRENT_FEED_INDEX][current_item_index]
-    current_time = time.time()
-    elapsed_time = current_time - article_start_time
-    if auto_scroll_paused:
-        if elapsed_time >= PAUSE_AT_START:
-            auto_scroll_paused = False
-    else:
-        # 説明文取得・整形
+    # 記事本文とタイトルを描画する
+    def draw_article_content(self, draw: ImageDraw.ImageDraw, item: Dict[str, Any], base_x: int, base_y: int, highlight_title: bool = False) -> int:
+        title = item["title"]
+        title_wrapped = textwrap.wrap(title, width=20)
+        y_pos = base_y
+        for i, line in enumerate(title_wrapped[:2]):
+            if highlight_title:
+                title_width = self.get_text_width(line, self.FONT)
+                draw.rectangle((base_x - 2, y_pos - 1, base_x + title_width + 2, y_pos + 11), fill=1)
+                draw.text((base_x, y_pos), line, font=self.FONT, fill=0)
+            else:
+                draw.text((base_x, y_pos), line, font=self.FONT, fill=1)
+            y_pos += 12
+        y_pos = base_y + (24 if len(title_wrapped) >= 2 else 12)
+        draw.line([(base_x, y_pos + 1), (base_x + WIDTH - 4, y_pos + 1)], fill=1)
+        y_pos += 2
+        desc_background_height = 14
+        draw.rectangle((base_x, y_pos, base_x + WIDTH - 4, y_pos + desc_background_height), fill=0)
         desc = item["description"].replace("\n", " ").strip()
-        desc_width = get_text_width(desc, FONT) if desc else 0
-        # 短文（スクロール不要）の場合は ARTICLE_DISPLAY_TIME 経過まで待機
-        if desc_width <= (WIDTH - 4):
-            if elapsed_time >= ARTICLE_DISPLAY_TIME:
-                move_to_next_article()
+        desc_x = base_x + WIDTH - self.scroll_position
+        if self.auto_scroll_paused:
+            desc_x = base_x
+        draw.text((desc_x, y_pos), desc, font=self.FONT, fill=1)
+        return y_pos + desc_background_height
+
+    # フィード切替時の通知（中央反転表示）
+    def draw_feed_notification(self, draw: ImageDraw.ImageDraw, feed_name: str):
+        draw.rectangle((10, HEIGHT // 2 - 12, WIDTH - 10, HEIGHT // 2 + 12), fill=1)
+        text_width = self.get_text_width(feed_name, self.FONT)
+        draw.text(((WIDTH - text_width) // 2, HEIGHT // 2 - 6), feed_name, font=self.FONT, fill=0)
+
+    # 現在のRSS記事内容を描画してImageを返す
+    def draw_rss_screen(self) -> Image.Image:
+        image = Image.new("1", (WIDTH, HEIGHT))
+        draw = ImageDraw.Draw(image)
+        header_height = 14
+
+        # ヘッダ部分の描画
+        draw.rectangle((0, 0, WIDTH, header_height), fill=1)
+        current_feed = RSS_FEEDS[self.current_feed_index]["title"]
+        draw.text((2, 1), current_feed, font=self.TITLE_FONT, fill=0)
+        current_time = time.strftime("%H:%M")
+        time_width = self.get_text_width(current_time, self.TITLE_FONT)
+        draw.text((WIDTH - time_width - 3, 1), current_time, font=self.TITLE_FONT, fill=0)
+        draw.line([(0, header_height), (WIDTH, header_height)], fill=1)
+        content_y = header_height + 2
+
+        # 以下、ローディング／トランジション／通常描画
+        if self.loading_effect > 0:
+            # ローディングバー・点滅テキスト
+            self.loading_effect -= 1
+            message = "ニュースを読み込み中..."
+            if self.loading_effect % 2 == 0:
+                msg_width = self.get_text_width(message, self.FONT)
+                draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
+
+            bar_count = 20
+            segment_width = 6
+            for i in range(bar_count):
+                segment_x = ((self.loading_effect + i) % (WIDTH // segment_width)) * segment_width
+                draw.rectangle((segment_x, HEIGHT - 8, segment_x + segment_width - 2, HEIGHT - 2), fill=1)
+
+        # トランジション中：記事を横スクロールで切替
+        elif self.transition_effect > 0:
+            self.transition_effect -= 1.5
+            progress = self.transition_effect / self.TRANSITION_FRAMES
+            offset = int(WIDTH * progress * self.transition_direction)
+            if self.news_items and self.current_feed_index in self.news_items and self.news_items[self.current_feed_index]:
+                item = self.news_items[self.current_feed_index][self.current_item_index]
+                self.draw_article_content(draw, item, 2 + offset, content_y)
+                prev_feed_idx = ((self.current_feed_index - 1) % len(RSS_FEEDS)
+                                 if self.transition_direction > 0
+                                 else (self.current_feed_index + 1) % len(RSS_FEEDS))
+                if prev_feed_idx in self.news_items and self.news_items[prev_feed_idx]:
+                    prev_item = self.news_items[prev_feed_idx][0]
+                    next_x = 2 + WIDTH * (-self.transition_direction) + offset
+                    self.draw_article_content(draw, prev_item, next_x, content_y)
+
+        # 通常記事表示
+        elif self.news_items and self.current_feed_index in self.news_items and 0 <= self.current_item_index < len(self.news_items[self.current_feed_index]):
+            item = self.news_items[self.current_feed_index][self.current_item_index]
+            self.draw_article_content(draw, item, 2, content_y)
+
+        # ニュースが存在しない場合のメッセージ
+        else:
+            message = "ニュースがありません"
+            msg_width = self.get_text_width(message, self.FONT)
+            draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
+
+        # フィード切替通知
+        if time.time() - self.feed_switch_time < 2.0:
+            self.draw_feed_notification(draw, RSS_FEEDS[self.current_feed_index]["title"])
+
+        return image
+
+# 4) GPIO処理・制御ロジック
+    # 次のRSSフィードへ切替
+    def switch_feed(self):
+        with self._state_lock:
+            self.current_feed_index = (self.current_feed_index + 1) % len(RSS_FEEDS)
+            self.current_item_index = 0
+            self.scroll_position = 0
+            self.article_start_time = time.time()
+            self.feed_switch_time = time.time()
+            self.auto_scroll_paused = True
+            self.transition_effect = self.TRANSITION_FRAMES
+            self.transition_direction = -1
+        self.log.info(f"Feed switched -> {RSS_FEEDS[self.current_feed_index]['title']}")
+
+    # 次の記事へ
+    def move_to_next_article(self):
+        with self._state_lock:
+            if not self.news_items or self.current_feed_index not in self.news_items or not self.news_items[self.current_feed_index]:
+                return
+            if self.current_item_index < len(self.news_items[self.current_feed_index]) - 1:
+                self.current_item_index += 1
+            else:
+                self.current_item_index = 0
+            self.scroll_position = 0
+            self.transition_effect = self.TRANSITION_FRAMES
+            self.transition_direction = -1
+            self.article_start_time = time.time()
+            self.auto_scroll_paused = True
+
+    # 前の記事へ（呼び出し無し）
+    def move_to_prev_article(self):
+        with self._state_lock:
+            if not self.news_items or self.current_feed_index not in self.news_items or not self.news_items[self.current_feed_index]:
+                return
+            if self.current_item_index > 0:
+                self.current_item_index -= 1
+            else:
+                self.current_item_index = len(self.news_items[self.current_feed_index]) - 1
+            self.scroll_position = 0
+            self.transition_effect = self.TRANSITION_FRAMES
+            self.transition_direction = 1
+            self.article_start_time = time.time()
+            self.auto_scroll_paused = True
+
+    # 説明文スクロール位置を更新する。
+    def update_scroll_position(self):
+        """
+        自動スクロールが有効な場合のみ self.scroll_position を増加させる。
+        """
+        # ガード
+        if (not self.news_items) or (self.transition_effect > 0) or (self.current_feed_index not in self.news_items):
+            return
+        if not self.news_items[self.current_feed_index]:
             return
 
-        # 長文スクロール
-        scroll_position += SCROLL_SPEED
-        # 末尾判定：テキスト幅＋画面幅＋余白(px) までスクロールしたら次記事へ
-        tail_margin_px = 24
-        if scroll_position > (desc_width + WIDTH + tail_margin_px):
-            move_to_next_article()
-
-
-#  描画本体
-def draw_article_content(draw, item, base_x, base_y, highlight_title=False):
-    """
-    記事のタイトル+説明文ブロックを表示
-    """
-    title = item["title"]
-    title_wrapped = textwrap.wrap(title, width=20)
-    y_pos = base_y
-
-    # タイトル 2行まで自動折返
-    for i, line in enumerate(title_wrapped[:2]):
-        if highlight_title:
-            title_width = get_text_width(line, FONT)
-            draw.rectangle(
-                (base_x - 2, y_pos - 1, base_x + title_width + 2, y_pos + 11), fill=1
-            )
-            draw.text((base_x, y_pos), line, font=FONT, fill=0)
-        else:
-            draw.text((base_x, y_pos), line, font=FONT, fill=1)
-        y_pos += 12
-    y_pos = base_y + (24 if len(title_wrapped) >= 2 else 12)
-    draw.line([(base_x, y_pos + 1), (base_x + WIDTH - 4, y_pos + 1)], fill=1)
-    y_pos += 2  # 本文と説明文の間のバーの位置
-
-    # 説明文（横スクロールエリア）
-    desc_background_height = 14
-    draw.rectangle(
-        (base_x, y_pos, base_x + WIDTH - 4, y_pos + desc_background_height), fill=0
-    )
-    desc = item["description"].replace("\n", " ").strip()
-    desc_x = base_x + WIDTH - scroll_position
-    if auto_scroll_paused:
-        desc_x = base_x
-    draw.text((desc_x, y_pos), desc, font=FONT, fill=1)
-    return y_pos + desc_background_height
-
-
-# フィード切替時に中央に大きくフィード名を一時表示
-def draw_feed_notification(draw, feed_name):
-    """
-    フィード切替時に中央に大きくフィード名を一時表示
-    """
-    draw.rectangle((10, HEIGHT // 2 - 12, WIDTH - 10, HEIGHT // 2 + 12), fill=1)
-    text_width = get_text_width(feed_name, FONT)
-    draw.text(
-        ((WIDTH - text_width) // 2, HEIGHT // 2 - 6), feed_name, font=FONT, fill=0
-    )
-
-
-# 画面全体を生成して返す描画メイン部
-def draw_rss_screen():
-    """
-    画面全体を生成して返す描画メイン部
-    """
-    global loading_effect, transition_effect, feed_switch_time
-    image = Image.new("1", (WIDTH, HEIGHT))  # 1bitモノクロ画像
-    draw = ImageDraw.Draw(image)
-    header_height = 14
-
-    # ヘッダ部
-    draw.rectangle((0, 0, WIDTH, header_height), fill=1)
-    current_feed = RSS_FEEDS[CURRENT_FEED_INDEX]["title"]
-    draw.text((2, 1), current_feed, font=TITLE_FONT, fill=0)  # フィード名
-    current_time = time.strftime("%H:%M")
-    time_width = get_text_width(current_time, TITLE_FONT)
-    draw.text((WIDTH - time_width - 3, 1), current_time, font=TITLE_FONT, fill=0)
-    draw.line([(0, header_height), (WIDTH, header_height)], fill=1)
-    content_y = header_height + 2
-
-    # 各種アニメ演出・記事本体
-    if loading_effect > 0:
-        loading_effect -= 1
-        message = "ニュースを読み込み中..."
-        if loading_effect % 2 == 0:
-            msg_width = get_text_width(message, FONT)
-            draw.text(
-                ((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=FONT, fill=1
-            )
-
-        # 読み出しアニメーション演出（例: 波が流れるようなバー）
-        bar_count = 20
-        segment_width = 6
-        for i in range(bar_count):
-            segment_x = (
-                (loading_effect + i) % (WIDTH // segment_width)
-            ) * segment_width
-            fill_val = 1 if i == 0 else 0  # 先頭だけ塗る場合
-            # でも「全部白」でもOK、iごとに遅延して流れる波に見せる
-            draw.rectangle(
-                (segment_x, HEIGHT - 8, segment_x + segment_width - 2, HEIGHT - 2),
-                fill=1,
-            )
-
-    # 記事・フィード切替演出（スライド、フェード等）
-    elif transition_effect > 0:
-        transition_effect -= 1.5  # 切替速度、数字が大きいほど切替が早い
-        progress = transition_effect / TRANSITION_FRAMES
-        offset = int(WIDTH * progress * transition_direction)
-        if (
-            news_items
-            and CURRENT_FEED_INDEX in news_items
-            and news_items[CURRENT_FEED_INDEX]
-        ):
-            item = news_items[CURRENT_FEED_INDEX][current_item_index]
-            draw_article_content(draw, item, 2 + offset, content_y)
-            prev_feed_idx = (
-                (CURRENT_FEED_INDEX - 1) % len(RSS_FEEDS)
-                if transition_direction > 0
-                else (CURRENT_FEED_INDEX + 1) % len(RSS_FEEDS)
-            )
-            if prev_feed_idx in news_items and news_items[prev_feed_idx]:
-                prev_item = news_items[prev_feed_idx][0]
-                next_x = 2 + WIDTH * (-transition_direction) + offset
-                draw_article_content(draw, prev_item, next_x, content_y)
-
-    # 通常記事表示
-    elif (
-        news_items
-        and CURRENT_FEED_INDEX in news_items
-        and 0 <= current_item_index < len(news_items[CURRENT_FEED_INDEX])
-    ):
-        item = news_items[CURRENT_FEED_INDEX][current_item_index]
-        draw_article_content(draw, item, 2, content_y)
-
-    # 記事ゼロ時のエラー表示
-    else:
-        message = "ニュースがありません"
-        msg_width = get_text_width(message, FONT)
-        draw.text(
-            ((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=FONT, fill=1
-        )
-
-    # フィード切替時の中央通知
-    if time.time() - feed_switch_time < 2.0:
-        draw_feed_notification(draw, RSS_FEEDS[CURRENT_FEED_INDEX]["title"])
-
-    return image
-
-
-# 安全な終了処理
-def luma_signal_handler(sig, frame):
-    """
-    終了時のGPIOクリーンアップとOLED消灯処理
-    """
-    print("\n[INFO] Exit Program.")
-    try:
-        import RPi.GPIO as GPIO
-
-        GPIO.cleanup()
-    except:
-        pass
-    if display:
-        blank = Image.new("1", (WIDTH, HEIGHT), 0)
-        try:
-            display.display(blank)
-        except:
-            pass
-    sys.exit(0)
-
-
-# 表示時間タイマ
-def is_display_time():
-    """設定した(時,分)で表示タイムウィンドウを判定"""
-    now = time.localtime()
-    now_hm = now.tm_hour * 60 + now.tm_min
-    start_hm = DISPLAY_TIME_START[0] * 60 + DISPLAY_TIME_START[1]
-    end_hm = DISPLAY_TIME_END[0] * 60 + DISPLAY_TIME_END[1]
-    return start_hm <= now_hm < end_hm
-
-
-# ポーリング検知
-def gpio_polling_thread():
-    """
-    GPIO18の状態をポーリングしてクリック／ダブルクリックを検知する。
-    割り込み競合がない安全な方式。
-    """
-    import RPi.GPIO as GPIO
-    prev_state = GPIO.input(BUTTON_FEED)
-    last_press_time = 0
-    click_count = 0
-    DOUBLE_CLICK_INTERVAL = 0.4  # 秒
-    LONG_PRESS_THRESHOLD = 1.5   # 将来拡張用（長押し判定）
-
-    print("[GPIO] Polling thread started")
-
-    while True:
-        state = GPIO.input(BUTTON_FEED)
-        now = time.time()
-
-        # 押下検知（HIGH→LOW）
-        if prev_state == GPIO.HIGH and state == GPIO.LOW:
-            if now - last_press_time <= DOUBLE_CLICK_INTERVAL:
-                click_count += 1
-            else:
-                click_count = 1
-            last_press_time = now
-
-        # 押下完了後に一定時間経過してから動作判定
-        if click_count > 0 and (now - last_press_time) > DOUBLE_CLICK_INTERVAL:
-            if click_count == 1:
-                move_to_next_article()
-                print("[GPIO] Single click → Next article")
-            elif click_count >= 2:
-                switch_feed()
-                print("[GPIO] Double click → Feed switched")
-            click_count = 0
-
-        prev_state = state
-        time.sleep(0.02)  # 50Hz（CPU負荷軽い）
-
-
-# メインエントリ
-def main():
-    global display, article_start_time, feed_switch_time
-    initialize()
-    if not fetch_rss_feed():
-        print("[RSS] First attempt to retrieve failed, retry...")
-
-    article_start_time = time.time()
-    feed_switch_time = time.time() - 10  # 初回はすぐfeed通知を消すようオフセット
-
-    # 自動切替タイミング初期化
-    last_feed_switch_time = time.time()
-
-    # RSS更新スレッド起動
-    feed_thread = threading.Thread(target=update_rss_feed_thread, daemon=True)
-    feed_thread.start()
-
-    # OLED初期化
-    try:
-        if USE_SPI:
-            from luma.core.interface.serial import spi
-            serial = spi(
-                port=SPI_PORT,
-                device=SPI_DEVICE,
-                gpio_DC=SPI_GPIO_DC,
-                gpio_RST=SPI_GPIO_RST,
-                gpio_CS=SPI_GPIO_CS,
-                bus_speed_hz=8000000  # 必要に応じ調整
-            )
-            print("[OLED] SPI mode selected")
-        else:
-            from luma.core.interface.serial import i2c
-            serial = i2c(port=1, address=0x3C)
-            print("[OLED] I2C mode selected")
-
-        global display
-        display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT, rotate=0)
-        display.contrast(0xFF)  # 初期化時のみ明るさ最大に
-        display.clear()
-        print("[OLED] SSD1309 Initialization complete")
-
-    except Exception as e:
-        print(f"[OLED] Initialization error: {e}")
-        sys.exit(1)
-
-    # OLED初期化完了後にボタンイベント登録（競合回避）
-    try:
-        import RPi.GPIO as GPIO
-        GPIO.remove_event_detect(BUTTON_FEED)
-        GPIO.add_event_detect(
-            BUTTON_FEED,
-            GPIO.FALLING,
-            callback=lambda x: handle_button_press("FEED"),
-            bouncetime=400,
-        )
-        print("[GPIO] Event detection added after OLED init")
-
-    except Exception as e:
-        print(f"[GPIO] post-init event detect error: {e}")
-
-    # 終了時の安全処理(Ctrl+C, kill等)
-    signal.signal(signal.SIGINT, luma_signal_handler)
-    signal.signal(signal.SIGTERM, luma_signal_handler)
-
-    # メインループ
-    last_update_time = time.time()
-    update_interval = 0.1  # update周期[秒]
-
-    try:
-        while True:
+        # 記事と経過時間の取得（ロック下）
+        with self._state_lock:
+            item = self.news_items[self.current_feed_index][self.current_item_index]
             current_time = time.time()
-            if current_time - last_update_time >= update_interval:
-                update_scroll_position()
-                image = draw_rss_screen()
-                display.display(image)
-                last_update_time = current_time
+            elapsed_time = current_time - self.article_start_time
+
+            # 表示開始直後は一時停止（PAUSE_AT_START 秒）
+            if self.auto_scroll_paused:
+                if elapsed_time >= self.PAUSE_AT_START:
+                    self.auto_scroll_paused = False
+                return  # 停止中はここで抜ける
+
+            # 説明文の幅を計測
+            desc = item["description"].replace("\n", " ").strip()
+            desc_width = self.get_text_width(desc, self.FONT) if desc else 0
+
+            # 短文（スクロール不要）は ARTICLE_DISPLAY_TIME 経過で次記事へ
+            if desc_width <= (WIDTH - 4):
+                if elapsed_time >= self.ARTICLE_DISPLAY_TIME:
+                    # ロック外で次記事遷移
+                    pass
+                else:
+                    return
+
+        # ロック外で状態遷移（短文の場合のみ）
+        if desc_width <= (WIDTH - 4):
+            self.move_to_next_article()
+            return
+
+        # 長文スクロールの更新（ロック下で位置のみ進める）
+        with self._state_lock:
+            self.scroll_position += self.SCROLL_SPEED
+            tail_margin_px = 24
+            reached_tail = (self.scroll_position > (desc_width + WIDTH + tail_margin_px))
+
+        # 末尾に達したらロック外で次記事へ（※ここが重要：条件成立時のみ呼ぶ）
+        if reached_tail:
+            self.move_to_next_article()
+
+    # GPIOポーリング（クリック/ダブルクリック処理）
+    def _gpio_polling_thread(self):
+        try:
+            import RPi.GPIO as GPIO
+        except Exception:
+            return
+
+        self.log.info("GPIO polling thread started")
+        while not self._stop_event.is_set():
+            try:
+                state = GPIO.input(BUTTON_FEED)
+                now = time.time()
+                if self._prev_button_state == 1 and state == 0:
+                    if now - self._last_press_time <= self.DOUBLE_CLICK_INTERVAL:
+                        self._click_count += 1
+                    else:
+                        self._click_count = 1
+                    self._last_press_time = now
+
+                if self._click_count > 0 and (now - self._last_press_time) > self.DOUBLE_CLICK_INTERVAL:
+                    if self._click_count == 1:
+                        self.move_to_next_article()
+                        self.log.info("[GPIO] Single click -> next article")
+                    else:
+                        self.switch_feed()
+                        self.log.info("[GPIO] Double click -> switch feed")
+                    self._click_count = 0
+
+                self._prev_button_state = state
+                time.sleep(self.GPIO_POLL_INTERVAL)
+            except Exception as e:
+                self.log.warning(f"GPIO polling error: {e}")
+                time.sleep(0.1)
+
+    # 時間帯表示制御
+    def is_display_time(self) -> bool:
+        now = time.localtime()
+        now_hm = now.tm_hour * 60 + now.tm_min
+        start_hm = DISPLAY_TIME_START[0] * 60 + DISPLAY_TIME_START[1]
+        end_hm = DISPLAY_TIME_END[0] * 60 + DISPLAY_TIME_END[1]
+        return start_hm <= now_hm < end_hm
+
+    # シグナル／終了処理
+    def _signal_handler(self, sig, frame):
+        self.log.info("Exiting...")
+        self._stop_event.set()
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.cleanup()
+        except Exception:
+            pass
+        if self.display:
+            blank = Image.new("1", (WIDTH, HEIGHT), 0)
+            try:
+                self.display.display(blank)
+            except Exception:
+                pass
+        sys.exit(0)
+
+# 5) メインループ
+    # メインループ（タイマー一元管理）
+    def run(self):
+        # 初回RSSフェッチ（リトライ内蔵）
+        if not self.fetch_rss_feed():
+            self.log.warning("First RSS fetch failed after retries")
+
+        last_feed_switch_time = time.time()
+        last_update_time = time.time()
+
+        while True:
+            now = time.time()
+
+            # 描画とスクロール更新
+            if now - last_update_time >= self.MAIN_UPDATE_INTERVAL:
+                self.update_scroll_position()
+                image = self.draw_rss_screen()
+                try:
+                    self.display.display(image)
+                except Exception as e:
+                    self.log.warning(f"OLED display error: {e}")
+                last_update_time = now
+
+            # フィード自動切替
+            if now - last_feed_switch_time >= self.FEED_SWITCH_INTERVAL:
+                try:
+                    self.switch_feed()
+                except Exception as e:
+                    self.log.warning(f"Auto feed switch error: {e}")
+                finally:
+                    last_feed_switch_time = time.time()
+
+            # 表示時間外はスリープ表示
+            if not self.is_display_time():
+                blank = Image.new("1", (WIDTH, HEIGHT))
+                draw = ImageDraw.Draw(blank)
+                # 非表示運用に合わせて空文字
+                msg = " "
+                msg_width = self.get_text_width(msg, self.FONT)
+                draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 8), msg, font=self.FONT, fill=1)
+                try:
+                    self.display.display(blank)
+                except Exception:
+                    pass
+                time.sleep(30)
+                # 復帰直後に即更新できるよう基準時刻調整
+                last_update_time = time.time()
+                continue
 
             time.sleep(0.01)
 
-            # フィード自動切替（10分ごと）
-            try:
-                if time.time() - last_feed_switch_time >= FEED_SWITCH_INTERVAL:
-                    switch_feed()
-                    # 切替後の状態初期化
-                    article_start_time = time.time()
-                    scroll_position = 0
-                    auto_scroll_paused = True
-                    last_feed_switch_time = time.time()
-            except Exception as e:
-                print(f"[AUTO FEED] switch error: {e}")
-
-            if not is_display_time():  # タイマー表示機能
-                # OLEDをクリア又は「時間外」と表示
-                blank = Image.new("1", (WIDTH, HEIGHT))
-                draw = ImageDraw.Draw(blank)
-                msg = " "  # 表示休止中などの文字をいれると、状態がわかりやすいが非表示
-                msg_width = get_text_width(msg, FONT)
-                draw.text(
-                    ((WIDTH - msg_width) // 2, HEIGHT // 2 - 8), msg, font=FONT, fill=1
-                )
-                display.display(blank)
-                time.sleep(30)
-                last_update_time = time.time()  # 時計が戻った時即復帰できるよう
-                continue
-
+# 6) エントリーポイント
+def main():
+    app = RSSReaderApp()
+    try:
+        app.initialize()
+        app.run()
     except KeyboardInterrupt:
-        luma_signal_handler(None, None)
-
+        app._signal_handler(None, None)
     except Exception as e:
-        print(f"[fatal error] {e}")
-        luma_signal_handler(None, None)
+        # ここは最上位キャッチ。ログして安全終了
+        logging.getLogger("rss_oled").error(f"Fatal error: {e}")
+        app._signal_handler(None, None)
 
 
 if __name__ == "__main__":
