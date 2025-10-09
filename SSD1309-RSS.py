@@ -48,7 +48,7 @@ BUTTON_FEED = 18
 
 # RSSフィード 必要に応じて手動で増減させてください
 RSS_FEEDS = [
-    {"title": "NHKニュース", "url": "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",            "color": 1},
+    {"title": "NHKニュース"     , "url": "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",       "color": 1},
     {"title": "NHKニュース 科学", "url": "https://news.web.nhk/n-data/conf/na/rss/cat3.xml",       "color": 1},
     {"title": "NHKニュース 政治", "url": "https://news.web.nhk/n-data/conf/na/rss/cat4.xml",       "color": 1},
     {"title": "NHKニュース 経済", "url": "https://news.web.nhk/n-data/conf/na/rss/cat5.xml",       "color": 1},
@@ -604,4 +604,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
