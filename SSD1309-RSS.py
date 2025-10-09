@@ -60,7 +60,7 @@ RSS_FEEDS = [
 
 # 画面表示時間の設定 8:30 - 18:00 のみ利用するとしている
 DISPLAY_TIME_START = (8, 30)
-DISPLAY_TIME_END = (18, 0)
+DISPLAY_TIME_END =  (18, 0)
 
 # SPI接続時はTrue / I2C接続時はFalse
 USE_SPI = False
@@ -88,44 +88,43 @@ class RSSReaderApp:
         # フォント
         self.TITLE_FONT = None
         self.FONT = None
-        self.SMALL_FONT = None
 
         # 設定（変更しやすい値をクラス属性に集約）
-        self.RSS_UPDATE_INTERVAL = 1800  # 秒
-        self.FEED_SWITCH_INTERVAL = 600  # 秒
-        self.SCROLL_SPEED = 12
-        self.ARTICLE_DISPLAY_TIME = 25.0
-        self.PAUSE_AT_START = 3.0
-        self.TRANSITION_FRAMES = 15
-        self.GPIO_POLL_INTERVAL = 0.02  # 秒
-        self.MAIN_UPDATE_INTERVAL = 0.1  # 秒
-        self.DOUBLE_CLICK_INTERVAL = 0.6  # 秒
+        self.RSS_UPDATE_INTERVAL = 1800           # 秒｜RSSを再取得する間隔（30分ごとに最新化）
+        self.FEED_SWITCH_INTERVAL = 600           # 秒｜フィード自動切替の間隔（10分で次のフィードへ）
+        self.SCROLL_SPEED = 4                     # pixcel/フレーム｜説明文の横スクロール速度（大きいほど速く流れる）
+        self.ARTICLE_DISPLAY_TIME = 25.0          # 秒｜短文（スクロール不要）の記事を次へ送るまでの待機時間
+        self.PAUSE_AT_START = 3.0                 # 秒｜記事表示直後のスクロール一時停止（読み始めの“間”を作る）
+        self.TRANSITION_FRAMES = 15               # フレーム数｜フィード/記事切替アニメの尺（多いほどゆっくり）
+        self.GPIO_POLL_INTERVAL = 0.02            # 秒｜GPIOポーリング周期（クリック検出のサンプリング間隔）
+        self.MAIN_UPDATE_INTERVAL = 0.1           # 秒｜描画更新周期（CPU負荷と滑らかさのトレードオフ）
+        self.DOUBLE_CLICK_INTERVAL = 0.6          # 秒｜ダブルクリック判定の間隔（この時間内の2押しでダブル扱い）
 
         # 状態（可変）
-        self.news_items: Dict[int, List[Dict[str, Any]]] = {}
-        self.current_feed_index: int = 0
-        self.current_item_index: int = 0
-        self.scroll_position: int = 0
-        self.last_rss_update: float = 0.0
-        self.article_start_time: float = 0.0
-        self.auto_scroll_paused: bool = True
-        self.feed_switch_time: float = 0.0
-        self.loading_effect: int = 0
-        self.transition_effect: float = 0.0
-        self.transition_direction: int = 1
+        self.news_items: Dict[int, List[Dict[str, Any]]] = {}  # 取得済みRSSをフィードindexごとに保持
+        self.current_feed_index: int = 0          # 現在表示中のフィードindex
+        self.current_item_index: int = 0          # 現在表示中の記事index（当該フィード内）
+        self.scroll_position: int = 0             # 説明文のスクロール位置（px）
+        self.last_rss_update: float = 0.0         # 最終RSS更新のエポック秒
+        self.article_start_time: float = 0.0      # 現記事の表示開始エポック秒（PAUSE判定や経過時間計算に使用）
+        self.auto_scroll_paused: bool = True      # Trueの間は説明文スクロールを停止（PAUSE_AT_STARTで解除）
+        self.feed_switch_time: float = 0.0        # 直近のフィード切替時刻（中央通知の表示条件に利用）
+        self.loading_effect: int = 0              # ローディング演出の残カウンタ（0で非表示）
+        self.transition_effect: float = 0.0       # 切替アニメの残フレーム量（>0の間はスライド描画）
+        self.transition_direction: int = 1        # 切替方向（+1:右へ／-1:左へ）アニメのオフセット符号に使用
 
         # スケジューラ／タイマー代替：メインループ内の時刻管理
-        self._last_main_update: float = 0.0
-        self._last_feed_switch_check: float = 0.0
+        self._last_main_update: float = 0.0       # 直近の描画更新実行時刻（MAIN_UPDATE_INTERVAL判定用）
+        self._last_feed_switch_check: float = 0.0 # 直近のフィード切替チェック時刻（FEED_SWITCH_INTERVAL判定用）
 
         # GPIO用
-        self._gpio_available = False
-        self._stop_event = threading.Event()
+        self._gpio_available = False              # TrueならGPIO使用可能（環境により未接続/未導入の考慮）
+        self._stop_event = threading.Event()      # 終了シグナル（スレッド/ループの安全停止に利用）
 
         # クリック検出（ポーリング方式に統一）
-        self._prev_button_state = 1
-        self._last_press_time = 0.0
-        self._click_count = 0
+        self._prev_button_state = 1               # 直前のボタン状態（1:未押下, 0:押下）
+        self._last_press_time = 0.0               # 直近の押下時刻（単/ダブルクリックの時間間隔判定に使用）
+        self._click_count = 0                     # クリック回数カウント（1=シングル, 2=ダブル）
 
         # ロック（必要最小限）
         self._state_lock = threading.Lock()
@@ -148,16 +147,13 @@ class RSSReaderApp:
             font_dir = os.path.dirname(os.path.abspath(__file__))
             title_font_file = os.path.join(font_dir, "JF-Dot-MPlusH10.ttf")
             main_font_file = os.path.join(font_dir, "JF-Dot-MPlusH12.ttf")
-            small_font_file = os.path.join(font_dir, "JF-Dot-k6x8.ttf")
             self.TITLE_FONT = ImageFont.truetype(title_font_file, 10)
             self.FONT = ImageFont.truetype(main_font_file, 12)
-            self.SMALL_FONT = ImageFont.truetype(small_font_file, 8)
             self.log.info("Fonts loaded")
         except Exception as e:
             self.log.warning(f"Font loading error: {e} -> using default fonts")
             self.TITLE_FONT = ImageFont.load_default()
             self.FONT = ImageFont.load_default()
-            self.SMALL_FONT = ImageFont.load_default()
 
     # GPIO初期化およびボタンスレッド起動
     def _init_gpio(self):
@@ -215,8 +211,7 @@ class RSSReaderApp:
             try:
                 all_items: List[Dict[str, Any]] = []
 
-                # feedparser は内部でHTTPを行う。timeoutはグローバルに設定できないため、
-                # socket のデフォルトタイムアウトを一時的に設定
+                # feedparser は内部でHTTPを行う。timeoutはグローバルに設定できないため、socket のデフォルトタイムアウトを一時的に設定
                 for idx, feed_info in enumerate(RSS_FEEDS):
                     self.log.info(f"Fetching: {feed_info['title']}")
                     prev_timeout = socket.getdefaulttimeout()
