@@ -31,6 +31,7 @@ Raspberry PiとSSD1309/SSD1306 OLEDディスプレイ用の、日本語表示対
     - `feedparser`
     - `pillow`
     - `RPi.GPIO`
+    - `asyncio`
 
 ---
 
@@ -91,6 +92,10 @@ python3 SSD1309_RSS.py
 ---
 
 ## 🔍 バージョンアップ履歴
+ver1.6<BR>
+- 非同期読み出しに対応し、RSS読み取りしている間にLCD画面が停止しなくなりました<BR>
+<BR>
+
 ver1.5<BR>
 - リファクタリングをおこないました。機能上の変更はありません<BR>
 <BR>
