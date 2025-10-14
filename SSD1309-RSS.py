@@ -29,6 +29,8 @@ import logging
 import re
 import textwrap
 import asyncio
+import contextlib
+
 from dataclasses import dataclass
 from collections import deque
 from typing import Dict, List, Any, Optional, Deque, Tuple
@@ -152,6 +154,8 @@ class RSSReaderApp:
         # GPIO用
         self._gpio_available = False              # TrueならGPIO使用可能（環境により未接続/未導入の考慮）
         self._stop_event = threading.Event()      # 終了シグナル（スレッド/ループの安全停止に利用）
+        self._background_tasks: List[asyncio.Task] = []
+        self._gpio_module = None
 
         # クリック検出（ポーリング方式に統一）
         self._prev_button_state = 1               # 直前のボタン状態（1:未押下, 0:押下）
@@ -163,7 +167,7 @@ class RSSReaderApp:
 
 # 1) 初期化処理
     # 初期化
-    def initialize(self):
+    def initialize(self) -> None:
         self._init_fonts()
         self._init_gpio()
         self._init_display()
@@ -178,7 +182,7 @@ class RSSReaderApp:
         self.scroll_position = 0.0
 
     # 日本語フォントの呼び出し
-    def _init_fonts(self):
+    def _init_fonts(self) -> None:
         try:
             font_dir = os.path.dirname(os.path.abspath(__file__))
             title_font_file = os.path.join(font_dir, "JF-Dot-MPlusH10.ttf")
@@ -186,30 +190,31 @@ class RSSReaderApp:
             self.TITLE_FONT = ImageFont.truetype(title_font_file, 10)
             self.FONT = ImageFont.truetype(main_font_file, 12)
             self.log.info("Fonts loaded")
+        except OSError as e:
+            self.log.error(f"Font loading error: {e} -> using default fonts")
+            self.TITLE_FONT = ImageFont.load_default()
+            self.FONT = ImageFont.load_default()
         except Exception as e:
-            self.log.warning(f"Font loading error: {e} -> using default fonts")
+            self.log.warning(f"Unexpected font loading issue: {e} -> using default fonts")
             self.TITLE_FONT = ImageFont.load_default()
             self.FONT = ImageFont.load_default()
 
     # GPIO初期化およびボタンスレッド起動
-    def _init_gpio(self):
+    def _init_gpio(self) -> None:
         try:
             import RPi.GPIO as GPIO
             GPIO.setwarnings(False)
             GPIO.setmode(GPIO.BCM)
             GPIO.setup(BUTTON_FEED, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             self._gpio_available = True
-
-            # ポーリングスレッド起動（統一）
-            t = threading.Thread(target=self._gpio_polling_thread, daemon=True)
-            t.start()
-            self.log.info("GPIO initialized (polling)")
+            self._gpio_module = GPIO
+            self.log.info("GPIO initialized (polling ready)")
         except Exception as e:
             self._gpio_available = False
             self.log.info(f"GPIO not available, software-only mode: {e}")
 
     # OLED初期化 (I2C/SPI切替対応)
-    def _init_display(self):
+    def _init_display(self) -> None:
         try:
             # SPIモード
             if USE_SPI:
@@ -238,7 +243,7 @@ class RSSReaderApp:
 
 # 2) RSS取得処理
     # RSS取得（非同期＆フェイルオーバー対応）
-    def fetch_rss_feed(self) -> bool:
+    async def fetch_rss_feed(self) -> bool:
         settings = self.network_settings
         total_attempts = settings.max_retries + 1
         self.log.info(
@@ -249,9 +254,9 @@ class RSSReaderApp:
         for attempt in range(1, total_attempts + 1):
             self._last_rss_refresh_attempt = time.time()
             try:
-                successes, errors = asyncio.run(self._fetch_rss_feed_async())
+                successes, errors = await self._fetch_rss_feed_async()
             except Exception as exc:
-                self.log.warning(
+                self.log.error(
                     f"RSS fetch error: {exc} (attempt {attempt}/{total_attempts})"
                 )
                 successes, errors = {}, {}
@@ -271,7 +276,8 @@ class RSSReaderApp:
 
             if attempt <= settings.max_retries:
                 delay = settings.base_delay * (2 ** (attempt - 1))
-                time.sleep(delay)
+                self.log.debug(f"Retrying RSS fetch after {delay:.1f}s delay")
+                await asyncio.sleep(delay)
 
         if self._restore_failover_snapshot():
             self.log.info("Using cached feed data due to fetch failure")
@@ -401,7 +407,7 @@ class RSSReaderApp:
                 return bbox[2] - bbox[0]
 
     # 記事本文とタイトルを描画する
-    def draw_article_content(self, draw: ImageDraw.ImageDraw, item: Dict[str, Any], base_x: int, base_y: int, highlight_title: bool = False) -> int:
+    def draw_article_content(self, draw: ImageDraw.ImageDraw, item: Dict[str, Any], base_x: int, base_y: int, highlight_title: bool = False,) -> int:
         title = item["title"]
         title_wrapped = textwrap.wrap(title, width=20)
         y_pos = base_y
@@ -427,7 +433,7 @@ class RSSReaderApp:
         return y_pos + desc_background_height
 
     # フィード切替時の通知（中央反転表示）
-    def draw_feed_notification(self, draw: ImageDraw.ImageDraw, feed_name: str):
+    def draw_feed_notification(self, draw: ImageDraw.ImageDraw, feed_name: str) -> None:
         draw.rectangle((10, HEIGHT // 2 - 12, WIDTH - 10, HEIGHT // 2 + 12), fill=1)
         text_width = self.get_text_width(feed_name, self.FONT)
         draw.text(((WIDTH - text_width) // 2, HEIGHT // 2 - 6), feed_name, font=self.FONT, fill=0)
@@ -548,7 +554,7 @@ class RSSReaderApp:
 
 
     # 説明文スクロール位置を更新する
-    def update_scroll_position(self):
+    def update_scroll_position(self) -> None:
         """
         自動スクロールが有効な場合のみ self.scroll_position を増加させる。
         """
@@ -617,13 +623,13 @@ class RSSReaderApp:
         return 1 - (1 - t) ** 3
 
     # GPIOポーリング（クリック/ダブルクリック処理）
-    def _gpio_polling_thread(self):
-        try:
-            import RPi.GPIO as GPIO
-        except Exception:
+    async def _gpio_polling_loop(self) -> None:
+        GPIO = self._gpio_module
+        if GPIO is None:
+            self.log.debug("GPIO module not available, polling loop not started")
             return
 
-        self.log.info("GPIO polling thread started")
+        self.log.info("GPIO polling task started")
         while not self._stop_event.is_set():
             try:
                 state = GPIO.input(BUTTON_FEED)
@@ -645,10 +651,10 @@ class RSSReaderApp:
                     self._click_count = 0
 
                 self._prev_button_state = state
-                time.sleep(self.GPIO_POLL_INTERVAL)
+                await asyncio.sleep(self.GPIO_POLL_INTERVAL)
             except Exception as e:
-                self.log.warning(f"GPIO polling error: {e}")
-                time.sleep(0.1)
+                self.log.error(f"GPIO polling error: {e}")
+                await asyncio.sleep(0.1)
 
     # 時間帯表示制御
     def is_display_time(self) -> bool:
@@ -659,7 +665,7 @@ class RSSReaderApp:
         return start_hm <= now_hm < end_hm
 
     # シグナル／終了処理
-    def _signal_handler(self, sig, frame):
+    def _signal_handler(self, sig, frame) -> None:
         self.log.info("Exiting...")
         self._stop_event.set()
         try:
@@ -677,25 +683,34 @@ class RSSReaderApp:
 
 # 5) メインループ
     # メインループ
-    def run(self):
-        if not self.fetch_rss_feed():
+    async def run(self) -> None:
+        if self._gpio_available:
+            self._background_tasks.append(asyncio.create_task(self._gpio_polling_loop()))
+
+        if not await self.fetch_rss_feed():
             self.log.warning("First RSS fetch failed after retries")
             self._apply_cache_to_news()
 
-        self._main_loop()
+        try:
+            await self._main_loop()
+        finally:
+            for task in self._background_tasks:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
-    def _main_loop(self):
+    async def _main_loop(self) -> None:
         while not self._stop_event.is_set():
             now = time.time()
 
-            if self._handle_display_window():
+            if await self._handle_display_window():
                 continue
 
-            self._handle_rss_refresh(now)
+            await self._handle_rss_refresh(now)
             self._handle_display_update(now)
             self._handle_auto_feed_switch(now)
 
-            time.sleep(0.01)
+            await asyncio.sleep(0.01)
 
     def _handle_display_update(self, now: float) -> None:
         if now - self._last_main_update < self.MAIN_UPDATE_INTERVAL:
@@ -720,14 +735,14 @@ class RSSReaderApp:
         finally:
             self._last_feed_switch_check = now
 
-    def _handle_rss_refresh(self, now: float) -> None:
+    async def _handle_rss_refresh(self, now: float) -> None:
         if now - self._last_rss_refresh_attempt < self.RSS_UPDATE_INTERVAL:
             return
 
-        if self.fetch_rss_feed():
+        if await self.fetch_rss_feed():
             self.log.info("Feeds refreshed")
 
-    def _handle_display_window(self) -> bool:
+    async def _handle_display_window(self) -> bool:
         if self.is_display_time():
             return False
 
@@ -741,7 +756,7 @@ class RSSReaderApp:
         except Exception:
             pass
 
-        time.sleep(self.display_settings.sleep_interval)
+        await asyncio.sleep(self.display_settings.sleep_interval)
         current = time.time()
         self._last_main_update = current
         self._last_scroll_time = current
@@ -749,11 +764,11 @@ class RSSReaderApp:
         return True
 
 # 6) エントリーポイント
-def main():
+async def main() -> None:
     app = RSSReaderApp()
     try:
         app.initialize()
-        app.run()
+        await app.run()
     except KeyboardInterrupt:
         app._signal_handler(None, None)
     except Exception as e:
@@ -763,4 +778,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
