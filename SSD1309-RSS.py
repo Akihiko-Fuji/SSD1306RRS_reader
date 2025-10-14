@@ -6,8 +6,8 @@ SSD1309/SSD1306 OLED RSSリーダー (I2C/SPI両対応)
 ファイル名    : SSD1309_RSS.py
 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 作成者        : Akihiko Fuji
-更新日        : 2025/10/9
-バージョン    : 1.5
+更新日        : 2025/10/10
+バージョン    : 1.6
 ------------------------------------------------
 Raspberry Pi + luma.oled環境で動作する日本語対応RSSビューワー。
 複数RSSソースを巡回し、記事を自動スクロール表示します。
@@ -17,7 +17,7 @@ Raspberry Pi + luma.oled環境で動作する日本語対応RSSビューワー�
  - 日本語表示のためフォント（例：JF-Dot）を同一フォルダに設置してください
 
 必要ライブラリ:
-    pip3 install luma.oled feedparser pillow RPi.GPIO
+    pip3 install luma.oled feedparser pillow RPi.GPIO asyncio
 """
 
 import os
@@ -26,12 +26,14 @@ import time
 import threading
 import signal
 import logging
-import logging.handlers
-import socket
 import re
 import textwrap
-from typing import Dict, List, Any, Optional
+import asyncio
+from dataclasses import dataclass
+from collections import deque
+from typing import Dict, List, Any, Optional, Deque, Tuple
 
+import aiohttp
 import feedparser
 from PIL import Image, ImageDraw, ImageFont
 
@@ -42,6 +44,26 @@ from luma.oled.device import ssd1309  # ssd1306 を利用する場合は変更
 # 液晶解像度設定
 WIDTH = 128
 HEIGHT = 64
+
+@dataclass(frozen=True)
+class NetworkSettings:
+    max_retries: int = 3
+    base_delay: float = 2.0
+    timeout: float = 10.0
+
+@dataclass(frozen=True)
+class CacheSettings:
+    max_items: int = 30
+
+@dataclass(frozen=True)
+class AnimationSettings:
+    scroll_speed: float = 4.0
+    easing_duration: float = 0.8
+    tail_margin_px: int = 24
+
+@dataclass(frozen=True)
+class DisplaySettings:
+    sleep_interval: int = 30
 
 # 送りやフィードに利用するGPIOピン（BCM）
 BUTTON_FEED = 18
@@ -86,10 +108,15 @@ class RSSReaderApp:
         self.TITLE_FONT = None
         self.FONT = None
 
+        # 設定クラス
+        self.network_settings = NetworkSettings()
+        self.cache_settings = CacheSettings()
+        self.animation_settings = AnimationSettings()
+        self.display_settings = DisplaySettings()
+
         # 設定（変更しやすい値をクラス属性に集約）
         self.RSS_UPDATE_INTERVAL = 1800           # 秒｜RSSを再取得する間隔（30分ごとに最新化）
         self.FEED_SWITCH_INTERVAL = 600           # 秒｜フィード自動切替の間隔（10分で次のフィードへ）
-        self.SCROLL_SPEED = 4                     # pixcel/フレーム｜説明文の横スクロール速度（大きいほど速く流れる）
         self.ARTICLE_DISPLAY_TIME = 25.0          # 秒｜短文（スクロール不要）の記事を次へ送るまでの待機時間
         self.PAUSE_AT_START = 3.0                 # 秒｜記事表示直後のスクロール一時停止（読み始めの“間”を作る）
         self.TRANSITION_FRAMES = 15               # フレーム数｜フィード/記事切替アニメの尺（多いほどゆっくり）
@@ -101,18 +128,26 @@ class RSSReaderApp:
         self.news_items: Dict[int, List[Dict[str, Any]]] = {}  # 取得済みRSSをフィードindexごとに保持
         self.current_feed_index: int = 0          # 現在表示中のフィードindex
         self.current_item_index: int = 0          # 現在表示中の記事index（当該フィード内）
-        self.scroll_position: int = 0             # 説明文のスクロール位置（px）
+        self.scroll_position: float = 0.0         # 説明文のスクロール位置（px）
         self.last_rss_update: float = 0.0         # 最終RSS更新のエポック秒
         self.article_start_time: float = 0.0      # 現記事の表示開始エポック秒（PAUSE判定や経過時間計算に使用）
         self.auto_scroll_paused: bool = True      # Trueの間は説明文スクロールを停止（PAUSE_AT_STARTで解除）
         self.feed_switch_time: float = 0.0        # 直近のフィード切替時刻（中央通知の表示条件に利用）
         self.loading_effect: int = 0              # ローディング演出の残カウンタ（0で非表示）
         self.transition_effect: float = 0.0       # 切替アニメの残フレーム量（>0の間はスライド描画）
-        self.transition_direction: int = 1        # 切替方向（+1:右へ／-1:左へ）アニメのオフセット符号に使用
+        self.transition_direction: int = 1        # 切替方向（1:右へ／-1:左へ）アニメのオフセット符号に使用
+
+        self.feed_cache: Dict[int, Deque[Dict[str, Any]]] = {
+            idx: deque(maxlen=self.cache_settings.max_items) for idx in range(len(RSS_FEEDS))
+        }
+        self.failover_snapshot: Dict[int, List[Dict[str, Any]]] = {}
 
         # スケジューラ／タイマー代替：メインループ内の時刻管理
         self._last_main_update: float = 0.0       # 直近の描画更新実行時刻（MAIN_UPDATE_INTERVAL判定用）
         self._last_feed_switch_check: float = 0.0 # 直近のフィード切替チェック時刻（FEED_SWITCH_INTERVAL判定用）
+        self._last_rss_refresh_attempt: float = 0.0
+        self._last_scroll_time: float = 0.0
+        self._scroll_ease_elapsed: float = 0.0
 
         # GPIO用
         self._gpio_available = False              # TrueならGPIO使用可能（環境により未接続/未導入の考慮）
@@ -137,6 +172,10 @@ class RSSReaderApp:
         self.feed_switch_time = time.time() - 10  # 初回通知オフセット
         self._last_main_update = time.time()
         self._last_feed_switch_check = time.time()
+        self._last_rss_refresh_attempt = time.time()
+        self._last_scroll_time = time.time()
+        self._scroll_ease_elapsed = 0.0
+        self.scroll_position = 0.0
 
     # 日本語フォントの呼び出し
     def _init_fonts(self):
@@ -198,79 +237,154 @@ class RSSReaderApp:
         signal.signal(signal.SIGTERM, self._signal_handler)
 
 # 2) RSS取得処理
-    # RSS取得（リトライ強化）
-    def fetch_rss_feed(self, max_retries: int = 3, base_delay: float = 2.0, timeout: float = 10.0) -> bool:
-        self.log.info("Fetching RSS feeds...")
+    # RSS取得（非同期＆フェイルオーバー対応）
+    def fetch_rss_feed(self) -> bool:
+        settings = self.network_settings
+        total_attempts = settings.max_retries + 1
+        self.log.info(
+            f"Fetching RSS feeds... (timeout={settings.timeout}s, attempts={total_attempts})"
+        )
         self.loading_effect = 10
-        attempt = 0
 
-        while attempt <= max_retries:
+        for attempt in range(1, total_attempts + 1):
+            self._last_rss_refresh_attempt = time.time()
             try:
-                all_items: List[Dict[str, Any]] = []
+                successes, errors = asyncio.run(self._fetch_rss_feed_async())
+            except Exception as exc:
+                self.log.warning(
+                    f"RSS fetch error: {exc} (attempt {attempt}/{total_attempts})"
+                )
+                successes, errors = {}, {}
 
-                # feedparser は内部でHTTPを行う。timeoutはグローバルに設定できないため、socket のデフォルトタイムアウトを一時的に設定
-                for idx, feed_info in enumerate(RSS_FEEDS):
-                    self.log.info(f"Fetching: {feed_info['title']}")
-                    prev_timeout = socket.getdefaulttimeout()
-                    socket.setdefaulttimeout(timeout)
-                    try:
-                        feed = feedparser.parse(feed_info["url"])
-                    finally:
-                        socket.setdefaulttimeout(prev_timeout)
+            if successes:
+                self._update_cache(successes)
+                if errors:
+                    self._handle_partial_failures(errors)
+                return True
 
-                    # HTTPステータス
-                    if hasattr(feed, "status") and feed.status != 200:
-                        raise ConnectionError(f"HTTP status {feed.status} for {feed_info['title']}")
+            if errors:
+                self._handle_partial_failures(errors)
 
-                    entries = getattr(feed, "entries", [])[:10]
-                    feed_items = []
-                    for entry in entries:
-                        title = getattr(entry, "title", "")
-                        desc = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
-                        desc = re.sub(r"<[^>]+>", "", desc)
-                        published = getattr(entry, "published", "")
-                        link = getattr(entry, "link", "")
-                        feed_items.append({
-                            "title": title,
-                            "description": desc,
-                            "published": published,
-                            "link": link,
-                            "feed_title": feed_info["title"],
-                            "feed_color": feed_info["color"],
-                            "feed_index": idx
-                        })
-                    self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
-                    all_items.extend(feed_items)
+            self.log.warning(
+                f"No feed items retrieved (attempt {attempt}/{total_attempts})"
+            )
 
-                if all_items:
-                    grouped: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(len(RSS_FEEDS))}
-                    for item in all_items:
-                        grouped[item["feed_index"]].append(item)
-                    with self._state_lock:
-                        self.news_items = grouped
-                        self.last_rss_update = time.time()
-                    self.log.info(f"Total items: {len(all_items)}")
-                    return True
-                else:
-                    self.log.warning("No items fetched")
-                    return False
-
-            # ネットワーク系（タイムアウト、HTTPステータス不良）
-            except (socket.timeout, ConnectionError) as e:
-                self.log.warning(f"Network error: {e} (attempt {attempt+1}/{max_retries})")
-
-            # IOエラー（DNS解決障害、ソケット問題等も含む可能性）
-            except (OSError, IOError) as e:
-                self.log.warning(f"I/O error: {e} (attempt {attempt+1}/{max_retries})")
-            except Exception as e:
-                self.log.error(f"Unexpected error while fetching RSS: {e} (attempt {attempt+1}/{max_retries})")
-
-            attempt += 1
-            if attempt <= max_retries:
-                delay = base_delay * (2 ** (attempt - 1))  # 指数バックオフ
+            if attempt <= settings.max_retries:
+                delay = settings.base_delay * (2 ** (attempt - 1))
                 time.sleep(delay)
 
+        if self._restore_failover_snapshot():
+            self.log.info("Using cached feed data due to fetch failure")
         return False
+
+    async def _fetch_rss_feed_async(self) -> Tuple[Dict[int, List[Dict[str, Any]]], Dict[int, Exception]]:
+        timeout = aiohttp.ClientTimeout(total=self.network_settings.timeout)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            tasks = [
+                self._fetch_single_feed(session, idx, feed_info)
+                for idx, feed_info in enumerate(RSS_FEEDS)
+            ]
+            results = await asyncio.gather(*tasks)
+
+        successes: Dict[int, List[Dict[str, Any]]] = {}
+        errors: Dict[int, Exception] = {}
+        for idx, items, error in results:
+            if error:
+                errors[idx] = error
+            else:
+                successes[idx] = items
+        return successes, errors
+
+    async def _fetch_single_feed(
+        self,
+        session: aiohttp.ClientSession,
+        idx: int,
+        feed_info: Dict[str, Any],
+    ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
+        try:
+            async with session.get(feed_info["url"]) as response:
+                response.raise_for_status()
+                text = await response.text()
+        except Exception as exc:
+            return idx, None, exc
+
+        try:
+            feed = feedparser.parse(text)
+            entries = getattr(feed, "entries", [])[:10]
+            feed_items: List[Dict[str, Any]] = []
+            for entry in entries:
+                title = getattr(entry, "title", "")
+                desc = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
+                desc = re.sub(r"<[^>]+>", "", desc)
+                published = getattr(entry, "published", "")
+                link = getattr(entry, "link", "")
+                feed_items.append(
+                    {
+                        "title": title,
+                        "description": desc,
+                        "published": published,
+                        "link": link,
+                        "feed_title": feed_info["title"],
+                        "feed_color": feed_info["color"],
+                        "feed_index": idx,
+                    }
+                )
+            self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
+            return idx, feed_items, None
+        except Exception as exc:
+            return idx, None, exc
+
+    def _update_cache(self, new_data: Dict[int, List[Dict[str, Any]]]) -> None:
+        for idx, items in new_data.items():
+            cache = self.feed_cache.setdefault(
+                idx, deque(maxlen=self.cache_settings.max_items)
+            )
+            if items:
+                cache.clear()
+                cache.extend(items[: self.cache_settings.max_items])
+
+        snapshot = self._apply_cache_to_news()
+        if snapshot is not None:
+            total_items = sum(len(items) for items in snapshot.values())
+            self.log.info(f"Total items: {total_items}")
+
+    def _apply_cache_to_news(self) -> Optional[Dict[int, List[Dict[str, Any]]]]:
+        if not self.feed_cache:
+            return None
+
+        snapshot: Dict[int, List[Dict[str, Any]]] = {
+            idx: list(cache) for idx, cache in self.feed_cache.items()
+        }
+        with self._state_lock:
+            self.news_items = snapshot
+            self.last_rss_update = time.time()
+
+        self.failover_snapshot = {
+            idx: list(items) for idx, items in snapshot.items()
+        }
+        return snapshot
+
+    def _restore_failover_snapshot(self) -> bool:
+        if not self.failover_snapshot:
+            return False
+
+        with self._state_lock:
+            self.news_items = {
+                idx: list(items) for idx, items in self.failover_snapshot.items()
+            }
+        self.log.warning("Restored news items from failover cache")
+        return True
+
+    def _handle_partial_failures(self, errors: Dict[int, Exception]) -> None:
+        for idx, error in errors.items():
+            feed_name = RSS_FEEDS[idx]["title"]
+            cache = self.feed_cache.get(idx)
+            if cache and len(cache) > 0:
+                self.log.warning(
+                    f"Feed fallback used for {feed_name}: {error}"
+                )
+            else:
+                self.log.error(f"Feed unavailable {feed_name}: {error}")
 
 # 3) 描画・表示制御
     # 画面描画ユーティリティ
@@ -305,7 +419,8 @@ class RSSReaderApp:
         desc_background_height = 14
         draw.rectangle((base_x, y_pos, base_x + WIDTH - 4, y_pos + desc_background_height), fill=0)
         desc = item["description"].replace("\n", " ").strip()
-        desc_x = base_x + WIDTH - self.scroll_position
+        scroll_offset = int(self.scroll_position)
+        desc_x = base_x + WIDTH - scroll_offset
         if self.auto_scroll_paused:
             desc_x = base_x
         draw.text((desc_x, y_pos), desc, font=self.FONT, fill=1)
@@ -387,12 +502,14 @@ class RSSReaderApp:
         with self._state_lock:
             self.current_feed_index = (self.current_feed_index + 1) % len(RSS_FEEDS)
             self.current_item_index = 0
-            self.scroll_position = 0
+            self.scroll_position = 0.0
             self.article_start_time = time.time()
             self.feed_switch_time = time.time()
             self.auto_scroll_paused = True
             self.transition_effect = self.TRANSITION_FRAMES
             self.transition_direction = -1
+            self._scroll_ease_elapsed = 0.0
+            self._last_scroll_time = time.time()
         self.log.info(f"Feed switched -> {RSS_FEEDS[self.current_feed_index]['title']}")
 
     # 次の記事へ
@@ -404,11 +521,13 @@ class RSSReaderApp:
                 self.current_item_index += 1
             else:
                 self.current_item_index = 0
-            self.scroll_position = 0
+            self.scroll_position = 0.0
             self.transition_effect = self.TRANSITION_FRAMES
             self.transition_direction = -1
             self.article_start_time = time.time()
             self.auto_scroll_paused = True
+            self._scroll_ease_elapsed = 0.0
+            self._last_scroll_time = time.time()
 
     # 前の記事へ（関数の呼び出しが掛かってないので、必要に応じてGPIOボタンなどに割り当てるなどをしてください）
     def move_to_prev_article(self):
@@ -419,11 +538,14 @@ class RSSReaderApp:
                 self.current_item_index -= 1
             else:
                 self.current_item_index = len(self.news_items[self.current_feed_index]) - 1
-            self.scroll_position = 0
+            self.scroll_position = 0.0
             self.transition_effect = self.TRANSITION_FRAMES
             self.transition_direction = 1
             self.article_start_time = time.time()
             self.auto_scroll_paused = True
+            self._scroll_ease_elapsed = 0.0
+            self._last_scroll_time = time.time()
+
 
     # 説明文スクロール位置を更新する
     def update_scroll_position(self):
@@ -446,6 +568,8 @@ class RSSReaderApp:
             if self.auto_scroll_paused:
                 if elapsed_time >= self.PAUSE_AT_START:
                     self.auto_scroll_paused = False
+                    self._scroll_ease_elapsed = 0.0
+                    self._last_scroll_time = current_time
                 return
 
             # 説明文の幅を計測
@@ -453,27 +577,44 @@ class RSSReaderApp:
             desc_width = self.get_text_width(desc, self.FONT) if desc else 0
 
             # 短文（スクロール不要）は ARTICLE_DISPLAY_TIME 経過で次記事へ
-            if desc_width <= (WIDTH - 4):
-                if elapsed_time >= self.ARTICLE_DISPLAY_TIME:
-                    # ロック外で次記事遷移
-                    pass
-                else:
-                    return
+            short_text = desc_width <= (WIDTH - 4)
+            ready_to_advance = elapsed_time >= self.ARTICLE_DISPLAY_TIME if short_text else False
 
-        # ロック外で状態遷移、短文の場合のみ
-        if desc_width <= (WIDTH - 4):
-            self.move_to_next_article()
+        if short_text:
+            if ready_to_advance:
+                self.move_to_next_article()
             return
 
-        # 長文スクロールの更新、ロック下で位置のみ進める
-        with self._state_lock:
-            self.scroll_position += self.SCROLL_SPEED
-            tail_margin_px = 24
-            reached_tail = (self.scroll_position > (desc_width + WIDTH + tail_margin_px))
+        now = time.time()
+        delta_time = now - self._last_scroll_time if self._last_scroll_time else self.MAIN_UPDATE_INTERVAL
+        self._last_scroll_time = now
+        self._scroll_ease_elapsed = min(
+            self._scroll_ease_elapsed + delta_time,
+            self.animation_settings.easing_duration,
+        )
+        progress = (
+            self._scroll_ease_elapsed / self.animation_settings.easing_duration
+            if self.animation_settings.easing_duration > 0
+            else 1.0
+        )
+        ease = self._ease_out_cubic(progress)
+        frame_factor = (
+            delta_time / self.MAIN_UPDATE_INTERVAL if self.MAIN_UPDATE_INTERVAL else 1.0
+        )
+        increment = self.animation_settings.scroll_speed * ease * frame_factor
 
-        # 末尾に達したらロック外で次記事へ
+        with self._state_lock:
+            self.scroll_position += increment
+            tail_margin_px = self.animation_settings.tail_margin_px
+            reached_tail = self.scroll_position > (desc_width + WIDTH + tail_margin_px)
+
         if reached_tail:
             self.move_to_next_article()
+
+    @staticmethod
+    def _ease_out_cubic(t: float) -> float:
+        t = max(0.0, min(1.0, t))
+        return 1 - (1 - t) ** 3
 
     # GPIOポーリング（クリック/ダブルクリック処理）
     def _gpio_polling_thread(self):
@@ -537,53 +678,75 @@ class RSSReaderApp:
 # 5) メインループ
     # メインループ
     def run(self):
-        # 初回RSSフェッチ、リトライ込み
         if not self.fetch_rss_feed():
             self.log.warning("First RSS fetch failed after retries")
+            self._apply_cache_to_news()
 
-        last_feed_switch_time = time.time()
-        last_update_time = time.time()
+        self._main_loop()
 
-        while True:
+    def _main_loop(self):
+        while not self._stop_event.is_set():
             now = time.time()
 
-            # 描画とスクロール更新
-            if now - last_update_time >= self.MAIN_UPDATE_INTERVAL:
-                self.update_scroll_position()
-                image = self.draw_rss_screen()
-                try:
-                    self.display.display(image)
-                except Exception as e:
-                    self.log.warning(f"OLED display error: {e}")
-                last_update_time = now
-
-            # フィード自動切替
-            if now - last_feed_switch_time >= self.FEED_SWITCH_INTERVAL:
-                try:
-                    self.switch_feed()
-                except Exception as e:
-                    self.log.warning(f"Auto feed switch error: {e}")
-                finally:
-                    last_feed_switch_time = time.time()
-
-            # 表示時間外はスリープ表示
-            if not self.is_display_time():
-                blank = Image.new("1", (WIDTH, HEIGHT))
-                draw = ImageDraw.Draw(blank)
-                # 非表示運用に合わせて空文字
-                msg = " "
-                msg_width = self.get_text_width(msg, self.FONT)
-                draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 8), msg, font=self.FONT, fill=1)
-                try:
-                    self.display.display(blank)
-                except Exception:
-                    pass
-                time.sleep(30)
-                # 復帰直後に即更新できるよう基準時刻調整
-                last_update_time = time.time()
+            if self._handle_display_window():
                 continue
 
+            self._handle_rss_refresh(now)
+            self._handle_display_update(now)
+            self._handle_auto_feed_switch(now)
+
             time.sleep(0.01)
+
+    def _handle_display_update(self, now: float) -> None:
+        if now - self._last_main_update < self.MAIN_UPDATE_INTERVAL:
+            return
+
+        self.update_scroll_position()
+        image = self.draw_rss_screen()
+        try:
+            self.display.display(image)
+        except Exception as e:
+            self.log.warning(f"OLED display error: {e}")
+        self._last_main_update = now
+
+    def _handle_auto_feed_switch(self, now: float) -> None:
+        if now - self._last_feed_switch_check < self.FEED_SWITCH_INTERVAL:
+            return
+
+        try:
+            self.switch_feed()
+        except Exception as e:
+            self.log.warning(f"Auto feed switch error: {e}")
+        finally:
+            self._last_feed_switch_check = now
+
+    def _handle_rss_refresh(self, now: float) -> None:
+        if now - self._last_rss_refresh_attempt < self.RSS_UPDATE_INTERVAL:
+            return
+
+        if self.fetch_rss_feed():
+            self.log.info("Feeds refreshed")
+
+    def _handle_display_window(self) -> bool:
+        if self.is_display_time():
+            return False
+
+        blank = Image.new("1", (WIDTH, HEIGHT))
+        draw = ImageDraw.Draw(blank)
+        msg = " "
+        msg_width = self.get_text_width(msg, self.FONT)
+        draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 8), msg, font=self.FONT, fill=1)
+        try:
+            self.display.display(blank)
+        except Exception:
+            pass
+
+        time.sleep(self.display_settings.sleep_interval)
+        current = time.time()
+        self._last_main_update = current
+        self._last_scroll_time = current
+        self._last_feed_switch_check = current
+        return True
 
 # 6) エントリーポイント
 def main():
