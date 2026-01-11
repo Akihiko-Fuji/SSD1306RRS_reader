@@ -256,6 +256,15 @@ class RSSReaderApp:
         # ロック（必要最小限）
         self._state_lock = threading.Lock()
 
+    def _reset_article_state(self, transition_direction: int) -> None:
+        self.scroll_position = 0.0
+        self.transition_effect = self.TRANSITION_FRAMES
+        self.transition_direction = transition_direction
+        self.article_start_time = time.time()
+        self.auto_scroll_paused = True
+        self._scroll_ease_elapsed = 0.0
+        self._last_scroll_time = time.time()
+
 # 1) 初期化処理
     # 初期化
     def initialize(self) -> None:
@@ -640,14 +649,8 @@ class RSSReaderApp:
         with self._state_lock:
             self.current_feed_index = (self.current_feed_index + 1) % len(RSS_FEEDS)
             self.current_item_index = 0
-            self.scroll_position = 0.0
-            self.article_start_time = time.time()
             self.feed_switch_time = time.time()
-            self.auto_scroll_paused = True
-            self.transition_effect = self.TRANSITION_FRAMES
-            self.transition_direction = -1
-            self._scroll_ease_elapsed = 0.0
-            self._last_scroll_time = time.time()
+            self._reset_article_state(transition_direction=-1)
         self.log.info(f"Feed switched -> {RSS_FEEDS[self.current_feed_index]['title']}")
 
     # 次の記事へ
@@ -659,13 +662,7 @@ class RSSReaderApp:
                 self.current_item_index += 1
             else:
                 self.current_item_index = 0
-            self.scroll_position = 0.0
-            self.transition_effect = self.TRANSITION_FRAMES
-            self.transition_direction = -1
-            self.article_start_time = time.time()
-            self.auto_scroll_paused = True
-            self._scroll_ease_elapsed = 0.0
-            self._last_scroll_time = time.time()
+            self._reset_article_state(transition_direction=-1)
 
     # 前の記事へ（関数の呼び出しが掛かってないので、必要に応じてGPIOボタンなどに割り当てるなどをしてください）
     def move_to_prev_article(self):
@@ -676,13 +673,7 @@ class RSSReaderApp:
                 self.current_item_index -= 1
             else:
                 self.current_item_index = len(self.news_items[self.current_feed_index]) - 1
-            self.scroll_position = 0.0
-            self.transition_effect = self.TRANSITION_FRAMES
-            self.transition_direction = 1
-            self.article_start_time = time.time()
-            self.auto_scroll_paused = True
-            self._scroll_ease_elapsed = 0.0
-            self._last_scroll_time = time.time()
+            self._reset_article_state(transition_direction=1)
 
 
     # 説明文スクロール位置を更新する
@@ -911,4 +902,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
