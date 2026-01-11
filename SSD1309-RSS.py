@@ -6,8 +6,8 @@ SSD1309/SSD1306 OLED RSSリーダー (I2C/SPI両対応)
 ファイル名    : SSD1309_RSS.py
 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 作成者        : Akihiko Fuji
-更新日        : 2025/10/10
-バージョン    : 1.6
+更新日        : 2026/01/12
+バージョン    : 1.7
 ------------------------------------------------
 Raspberry Pi + luma.oled環境で動作する日本語対応RSSビューワー。
 複数RSSソースを巡回し、記事を自動スクロール表示します。
@@ -30,6 +30,8 @@ import re
 import textwrap
 import asyncio
 import contextlib
+import csv
+from pathlib import Path
 
 from dataclasses import dataclass
 from collections import deque
@@ -67,17 +69,116 @@ class AnimationSettings:
 class DisplaySettings:
     sleep_interval: int = 30
 
+# ログ設定
+def setup_logging() -> logging.Logger:
+    logger = logging.getLogger("rss_oled")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        fmt = logging.Formatter("[%(levelname)s] %(asctime)s %(message)s")
+        handler.setFormatter(fmt)
+        logger.addHandler(handler)
+    return logger
+
+
 # 送りやフィードに利用するGPIOピン（BCM）
 BUTTON_FEED = 18
 
-# RSSフィード 必要に応じて手動で増減させてください
-RSS_FEEDS = [
-    {"title": "NHKニュース"     , "url": "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",       "color": 1},
-    {"title": "NHKニュース 科学", "url": "https://news.web.nhk/n-data/conf/na/rss/cat3.xml",       "color": 1},
-    {"title": "NHKニュース 政治", "url": "https://news.web.nhk/n-data/conf/na/rss/cat4.xml",       "color": 1},
-    {"title": "NHKニュース 経済", "url": "https://news.web.nhk/n-data/conf/na/rss/cat5.xml",       "color": 1},
-    {"title": "NHKニュース 国際", "url": "https://news.web.nhk/n-data/conf/na/rss/cat6.xml",       "color": 1},
+RSS_FEED_FILE = "rss-read.me"
+
+# RSSフィード（rss-read.meが未配置/空のときに使われるデフォルト）
+DEFAULT_RSS_FEEDS = [
+    {"title": "NHKニュース"     , "url": "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",       "color": 1, "type": "rss"},
+    {"title": "NHKニュース 科学", "url": "https://news.web.nhk/n-data/conf/na/rss/cat3.xml",       "color": 1, "type": "rss"},
+    {"title": "NHKニュース 政治", "url": "https://news.web.nhk/n-data/conf/na/rss/cat4.xml",       "color": 1, "type": "rss"},
+    {"title": "NHKニュース 経済", "url": "https://news.web.nhk/n-data/conf/na/rss/cat5.xml",       "color": 1, "type": "rss"},
+    {"title": "NHKニュース 国際", "url": "https://news.web.nhk/n-data/conf/na/rss/cat6.xml",       "color": 1, "type": "rss"},
 ]
+
+
+def _parse_feed_row(values: List[str], log: logging.Logger, line_no: int) -> Optional[Dict[str, Any]]:
+    title = ""
+    url = ""
+    color = 1
+    feed_type = "rss"
+    if len(values) == 1:
+        url = values[0]
+        title = values[0]
+    elif len(values) == 2:
+        title, url = values
+    elif len(values) == 3:
+        title, url, color_value = values[:3]
+        try:
+            color = int(color_value)
+        except ValueError:
+            log.warning(
+                "Invalid color value '%s' in rss-read.me line %d; using default 1",
+                color_value,
+                line_no,
+            )
+            color = 1
+    else:
+        title, url, color_value, feed_type_value = values[:4]
+        try:
+            color = int(color_value)
+        except ValueError:
+            log.warning(
+                "Invalid color value '%s' in rss-read.me line %d; using default 1",
+                color_value,
+                line_no,
+            )
+            color = 1
+        if feed_type_value:
+            feed_type = feed_type_value.lower()
+    if feed_type not in ("rss", "text"):
+        log.warning(
+            "Unknown feed type '%s' in rss-read.me line %d; using 'rss'",
+            feed_type,
+            line_no,
+        )
+        feed_type = "rss"
+    if not url:
+        log.warning("Missing URL in rss-read.me line %d; skipping", line_no)
+        return None
+    return {"title": title or url, "url": url, "color": color, "type": feed_type}
+
+
+def _load_rss_feeds(feed_path: str, log: logging.Logger) -> Tuple[List[Dict[str, Any]], str]:
+    if not os.path.exists(feed_path):
+        log.warning("rss-read.me not found at %s; using built-in defaults", feed_path)
+        return DEFAULT_RSS_FEEDS, "built-in defaults (rss-read.me not found)"
+
+    feeds: List[Dict[str, Any]] = []
+    try:
+        with open(feed_path, newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            for line_no, row in enumerate(reader, start=1):
+                if not row:
+                    continue
+                if row[0].strip().startswith("#"):
+                    continue
+                values = [item.strip() for item in row if item is not None]
+                if not values:
+                    continue
+                feed = _parse_feed_row(values, log, line_no)
+                if feed is not None:
+                    feeds.append(feed)
+    except (OSError, csv.Error) as exc:
+        log.error("Failed to read rss-read.me (%s); using defaults", exc)
+        return DEFAULT_RSS_FEEDS, "built-in defaults (rss-read.me unreadable)"
+
+    if not feeds:
+        log.warning("rss-read.me had no usable feeds; using built-in defaults")
+        return DEFAULT_RSS_FEEDS, "built-in defaults (rss-read.me empty)"
+
+    return feeds, f"rss-read.me ({len(feeds)} feeds)"
+
+
+_FEED_LOGGER = setup_logging()
+RSS_FEEDS, RSS_FEED_SOURCE = _load_rss_feeds(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), RSS_FEED_FILE),
+    _FEED_LOGGER,
+)
 
 # 画面表示時間の設定 8:30 - 18:00 のみ利用するとしている
 DISPLAY_TIME_START = (8, 30)
@@ -86,22 +187,12 @@ DISPLAY_TIME_END =  (18, 0)
 # SPI接続時はTrue / I2C接続時はFalse
 USE_SPI = False
 
-# ログ設定
-def setup_logging():
-    logger = logging.getLogger("rss_oled")
-    logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler(sys.stdout)
-    fmt = logging.Formatter("[%(levelname)s] %(asctime)s %(message)s")
-    handler.setFormatter(fmt)
-    logger.addHandler(handler)
-    return logger
-
-
 class RSSReaderApp:
     # 主要変数と状態を初期化
     def __init__(self):
         # ロガー
         self.log = setup_logging()
+        self.log.info(f"RSS feeds loaded from {RSS_FEED_SOURCE}")
 
         # 表示・描画
         self.display = None
@@ -308,37 +399,78 @@ class RSSReaderApp:
         feed_info: Dict[str, Any],
     ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
         try:
-            async with session.get(feed_info["url"]) as response:
-                response.raise_for_status()
-                text = await response.text()
+            if feed_info.get("type") == "text":
+                return await self._fetch_text_feed(session, idx, feed_info)
+            return await self._fetch_rss_feed(session, idx, feed_info)
         except Exception as exc:
+            self.log.error("Feed fetch failed for %s: %s", feed_info["title"], exc)
             return idx, None, exc
 
-        try:
-            feed = feedparser.parse(text)
-            entries = getattr(feed, "entries", [])[:10]
-            feed_items: List[Dict[str, Any]] = []
-            for entry in entries:
-                title = getattr(entry, "title", "")
-                desc = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
-                desc = re.sub(r"<[^>]+>", "", desc)
-                published = getattr(entry, "published", "")
-                link = getattr(entry, "link", "")
-                feed_items.append(
-                    {
-                        "title": title,
-                        "description": desc,
-                        "published": published,
-                        "link": link,
-                        "feed_title": feed_info["title"],
-                        "feed_color": feed_info["color"],
-                        "feed_index": idx,
-                    }
-                )
-            self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
-            return idx, feed_items, None
-        except Exception as exc:
-            return idx, None, exc
+    async def _fetch_rss_feed(
+        self,
+        session: aiohttp.ClientSession,
+        idx: int,
+        feed_info: Dict[str, Any],
+    ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
+        async with session.get(feed_info["url"]) as response:
+            response.raise_for_status()
+            text = await response.text()
+
+        feed = feedparser.parse(text)
+        entries = getattr(feed, "entries", [])[:10]
+        feed_items: List[Dict[str, Any]] = []
+        for entry in entries:
+            title = getattr(entry, "title", "")
+            desc = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
+            desc = re.sub(r"<[^>]+>", "", desc)
+            published = getattr(entry, "published", "")
+            link = getattr(entry, "link", "")
+            feed_items.append(
+                {
+                    "title": title,
+                    "description": desc,
+                    "published": published,
+                    "link": link,
+                    "feed_title": feed_info["title"],
+                    "feed_color": feed_info["color"],
+                    "feed_index": idx,
+                }
+            )
+        self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
+        return idx, feed_items, None
+
+    async def _fetch_text_feed(
+        self,
+        session: aiohttp.ClientSession,
+        idx: int,
+        feed_info: Dict[str, Any],
+    ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
+        source = feed_info["url"]
+        if source.startswith(("http://", "https://")):
+            async with session.get(source) as response:
+                response.raise_for_status()
+                text = await response.text()
+        else:
+            text = await asyncio.to_thread(self._read_text_file, source)
+
+        description = text.strip()
+        item = {
+            "title": feed_info["title"],
+            "description": description,
+            "published": "",
+            "link": "",
+            "feed_title": feed_info["title"],
+            "feed_color": feed_info["color"],
+            "feed_index": idx,
+        }
+        self.log.info(f" -> {feed_info['title']}: 1 item (text)")
+        return idx, [item], None
+
+    def _read_text_file(self, source: str) -> str:
+        path = Path(source)
+        if not path.is_file():
+            raise FileNotFoundError(f"Text source not found: {source}")
+        return path.read_text(encoding="utf-8")
 
     def _update_cache(self, new_data: Dict[int, List[Dict[str, Any]]]) -> None:
         for idx, items in new_data.items():
@@ -779,3 +911,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
