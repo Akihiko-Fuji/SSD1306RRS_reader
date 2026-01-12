@@ -3,7 +3,7 @@
 
 """
 SSD1309/SSD1306 OLED RSSリーダー (I2C/SPI両対応)
-ファイル名    : SSD1309_RSS.py
+ファイル名    : SSD1309-RSS.py
 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 作成者        : Akihiko Fuji
 更新日        : 2026/01/12
@@ -42,7 +42,6 @@ import feedparser
 from PIL import Image, ImageDraw, ImageFont
 
 # luma.oled
-from luma.core.interface.serial import i2c
 from luma.oled.device import ssd1309  # ssd1306 を利用する場合は変更
 
 # 液晶解像度設定
@@ -70,6 +69,7 @@ class DisplaySettings:
     sleep_interval: int = 30
 
 # ログ設定
+# ログ出力設定を初期化する
 def setup_logging() -> logging.Logger:
     logger = logging.getLogger("rss_oled")
     logger.setLevel(logging.INFO)
@@ -96,6 +96,7 @@ DEFAULT_RSS_FEEDS = [
 ]
 
 
+# rss-read.meの1行を解析してフィード情報を作る
 def _parse_feed_row(values: List[str], log: logging.Logger, line_no: int) -> Optional[Dict[str, Any]]:
     title = ""
     url = ""
@@ -143,6 +144,7 @@ def _parse_feed_row(values: List[str], log: logging.Logger, line_no: int) -> Opt
     return {"title": title or url, "url": url, "color": color, "type": feed_type}
 
 
+# RSS定義ファイルを読み込んでフィード一覧を返す
 def _load_rss_feeds(feed_path: str, log: logging.Logger) -> Tuple[List[Dict[str, Any]], str]:
     if not os.path.exists(feed_path):
         log.warning("rss-read.me not found at %s; using built-in defaults", feed_path)
@@ -174,12 +176,6 @@ def _load_rss_feeds(feed_path: str, log: logging.Logger) -> Tuple[List[Dict[str,
     return feeds, f"rss-read.me ({len(feeds)} feeds)"
 
 
-_FEED_LOGGER = setup_logging()
-RSS_FEEDS, RSS_FEED_SOURCE = _load_rss_feeds(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), RSS_FEED_FILE),
-    _FEED_LOGGER,
-)
-
 # 画面表示時間の設定 8:30 - 18:00 のみ利用するとしている
 DISPLAY_TIME_START = (8, 30)
 DISPLAY_TIME_END =  (18, 0)
@@ -189,10 +185,15 @@ USE_SPI = False
 
 class RSSReaderApp:
     # 主要変数と状態を初期化
+    # アプリの初期状態と設定を構築する
     def __init__(self):
         # ロガー
         self.log = setup_logging()
-        self.log.info(f"RSS feeds loaded from {RSS_FEED_SOURCE}")
+        self.rss_feeds, self.rss_feed_source = _load_rss_feeds(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), RSS_FEED_FILE),
+            self.log,
+        )
+        self.log.info(f"RSS feeds loaded from {self.rss_feed_source}")
 
         # 表示・描画
         self.display = None
@@ -231,7 +232,8 @@ class RSSReaderApp:
         self.transition_direction: int = 1        # 切替方向（1:右へ／-1:左へ）アニメのオフセット符号に使用
 
         self.feed_cache: Dict[int, Deque[Dict[str, Any]]] = {
-            idx: deque(maxlen=self.cache_settings.max_items) for idx in range(len(RSS_FEEDS))
+            idx: deque(maxlen=self.cache_settings.max_items)
+            for idx in range(len(self.rss_feeds))
         }
         self.failover_snapshot: Dict[int, List[Dict[str, Any]]] = {}
 
@@ -256,6 +258,7 @@ class RSSReaderApp:
         # ロック（必要最小限）
         self._state_lock = threading.Lock()
 
+    # 記事切替時の表示状態を初期化する
     def _reset_article_state(self, transition_direction: int) -> None:
         self.scroll_position = 0.0
         self.transition_effect = self.TRANSITION_FRAMES
@@ -267,6 +270,7 @@ class RSSReaderApp:
 
 # 1) 初期化処理
     # 初期化
+    # 起動時の初期化処理をまとめて実行する
     def initialize(self) -> None:
         self._init_fonts()
         self._init_gpio()
@@ -282,6 +286,7 @@ class RSSReaderApp:
         self.scroll_position = 0.0
 
     # 日本語フォントの呼び出し
+    # 表示用フォントを読み込む
     def _init_fonts(self) -> None:
         try:
             font_dir = os.path.dirname(os.path.abspath(__file__))
@@ -300,6 +305,7 @@ class RSSReaderApp:
             self.FONT = ImageFont.load_default()
 
     # GPIO初期化およびボタンスレッド起動
+    # GPIOを初期化してボタン入力を準備する
     def _init_gpio(self) -> None:
         try:
             import RPi.GPIO as GPIO
@@ -314,11 +320,13 @@ class RSSReaderApp:
             self.log.info(f"GPIO not available, software-only mode: {e}")
 
     # OLED初期化 (I2C/SPI切替対応)
+    # OLEDディスプレイを初期化する
     def _init_display(self) -> None:
         try:
             # SPIモード
             if USE_SPI:
                 from luma.core.interface.serial import spi
+
                 serial = spi(device=0, port=0, gpio_DC=24, gpio_RST=25)
                 self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT) # ssd1306 を利用する場合は変更
                 self.log.info("OLED initialized (SPI mode)")
@@ -326,6 +334,7 @@ class RSSReaderApp:
             # I2Cモード
             else:
                 from luma.core.interface.serial import i2c
+
                 serial = i2c(port=1, address=0x3C) # アドレスが異なる場合は sudo i2cdetect -y 1 で確認し変更してください
                 self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT) # ssd1306 を利用する場合は変更
                 self.log.info("OLED initialized (I2C mode)")
@@ -337,12 +346,14 @@ class RSSReaderApp:
             raise
 
     # SIGINT/SIGTERMの終了ハンドラを登録
+    # 終了シグナルのハンドラを登録する
     def _install_signal_handlers(self):
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
 # 2) RSS取得処理
     # RSS取得（非同期＆フェイルオーバー対応）
+    # RSS取得のリトライとキャッシュ更新を行う
     async def fetch_rss_feed(self) -> bool:
         settings = self.network_settings
         total_attempts = settings.max_retries + 1
@@ -351,6 +362,7 @@ class RSSReaderApp:
         )
         self.loading_effect = 10
 
+        # リトライしながらRSS取得を試みる
         for attempt in range(1, total_attempts + 1):
             self._last_rss_refresh_attempt = time.time()
             try:
@@ -383,12 +395,14 @@ class RSSReaderApp:
             self.log.info("Using cached feed data due to fetch failure")
         return False
 
+    # 全フィードを並列で取得する
     async def _fetch_rss_feed_async(self) -> Tuple[Dict[int, List[Dict[str, Any]]], Dict[int, Exception]]:
         timeout = aiohttp.ClientTimeout(total=self.network_settings.timeout)
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            # 全フィードの取得タスクを並列実行
             tasks = [
                 self._fetch_single_feed(session, idx, feed_info)
-                for idx, feed_info in enumerate(RSS_FEEDS)
+                for idx, feed_info in enumerate(self.rss_feeds)
             ]
             results = await asyncio.gather(*tasks)
 
@@ -401,6 +415,7 @@ class RSSReaderApp:
                 successes[idx] = items
         return successes, errors
 
+    # 単一フィードを種別に応じて取得する
     async def _fetch_single_feed(
         self,
         session: aiohttp.ClientSession,
@@ -415,6 +430,7 @@ class RSSReaderApp:
             self.log.error("Feed fetch failed for %s: %s", feed_info["title"], exc)
             return idx, None, exc
 
+    # RSS形式のフィードを取得して整形する
     async def _fetch_rss_feed(
         self,
         session: aiohttp.ClientSession,
@@ -448,6 +464,7 @@ class RSSReaderApp:
         self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
         return idx, feed_items, None
 
+    # テキスト形式のフィードを取得して整形する
     async def _fetch_text_feed(
         self,
         session: aiohttp.ClientSession,
@@ -475,12 +492,14 @@ class RSSReaderApp:
         self.log.info(f" -> {feed_info['title']}: 1 item (text)")
         return idx, [item], None
 
+    # ローカルテキストファイルを読み込む
     def _read_text_file(self, source: str) -> str:
         path = Path(source)
         if not path.is_file():
             raise FileNotFoundError(f"Text source not found: {source}")
         return path.read_text(encoding="utf-8")
 
+    # 取得結果をキャッシュへ反映する
     def _update_cache(self, new_data: Dict[int, List[Dict[str, Any]]]) -> None:
         for idx, items in new_data.items():
             cache = self.feed_cache.setdefault(
@@ -495,6 +514,7 @@ class RSSReaderApp:
             total_items = sum(len(items) for items in snapshot.values())
             self.log.info(f"Total items: {total_items}")
 
+    # キャッシュ内容を表示用データへ適用する
     def _apply_cache_to_news(self) -> Optional[Dict[int, List[Dict[str, Any]]]]:
         if not self.feed_cache:
             return None
@@ -511,6 +531,7 @@ class RSSReaderApp:
         }
         return snapshot
 
+    # 失敗時にフェイルオーバーキャッシュを復元する
     def _restore_failover_snapshot(self) -> bool:
         if not self.failover_snapshot:
             return False
@@ -522,9 +543,10 @@ class RSSReaderApp:
         self.log.warning("Restored news items from failover cache")
         return True
 
+    # 部分的な取得失敗をログに通知する
     def _handle_partial_failures(self, errors: Dict[int, Exception]) -> None:
         for idx, error in errors.items():
-            feed_name = RSS_FEEDS[idx]["title"]
+            feed_name = self.rss_feeds[idx]["title"]
             cache = self.feed_cache.get(idx)
             if cache and len(cache) > 0:
                 self.log.warning(
@@ -535,6 +557,7 @@ class RSSReaderApp:
 
 # 3) 描画・表示制御
     # 画面描画ユーティリティ
+    # テキスト幅を計測する
     def get_text_width(self, text: str, font: ImageFont.FreeTypeFont) -> int:
         try:
             return int(font.getlength(text))
@@ -548,6 +571,7 @@ class RSSReaderApp:
                 return bbox[2] - bbox[0]
 
     # 記事本文とタイトルを描画する
+    # 記事のタイトルと本文を描画する
     def draw_article_content(self, draw: ImageDraw.ImageDraw, item: Dict[str, Any], base_x: int, base_y: int, highlight_title: bool = False,) -> int:
         title = item["title"]
         title_wrapped = textwrap.wrap(title, width=20)
@@ -574,12 +598,14 @@ class RSSReaderApp:
         return y_pos + desc_background_height
 
     # フィード切替時の通知（中央反転表示）
+    # フィード切替通知を描画する
     def draw_feed_notification(self, draw: ImageDraw.ImageDraw, feed_name: str) -> None:
         draw.rectangle((10, HEIGHT // 2 - 12, WIDTH - 10, HEIGHT // 2 + 12), fill=1)
         text_width = self.get_text_width(feed_name, self.FONT)
         draw.text(((WIDTH - text_width) // 2, HEIGHT // 2 - 6), feed_name, font=self.FONT, fill=0)
 
     # 現在のRSS記事内容を描画してImageを返す
+    # 現在の表示内容を描画して画像を返す
     def draw_rss_screen(self) -> Image.Image:
         image = Image.new("1", (WIDTH, HEIGHT))
         draw = ImageDraw.Draw(image)
@@ -587,7 +613,7 @@ class RSSReaderApp:
 
         # ヘッダ部分の描画
         draw.rectangle((0, 0, WIDTH, header_height), fill=1)
-        current_feed = RSS_FEEDS[self.current_feed_index]["title"]
+        current_feed = self.rss_feeds[self.current_feed_index]["title"]
         draw.text((2, 1), current_feed, font=self.TITLE_FONT, fill=0)
         current_time = time.strftime("%H:%M")
         time_width = self.get_text_width(current_time, self.TITLE_FONT)
@@ -618,9 +644,9 @@ class RSSReaderApp:
             if self.news_items and self.current_feed_index in self.news_items and self.news_items[self.current_feed_index]:
                 item = self.news_items[self.current_feed_index][self.current_item_index]
                 self.draw_article_content(draw, item, 2 + offset, content_y)
-                prev_feed_idx = ((self.current_feed_index - 1) % len(RSS_FEEDS)
+                prev_feed_idx = ((self.current_feed_index - 1) % len(self.rss_feeds)
                                  if self.transition_direction > 0
-                                 else (self.current_feed_index + 1) % len(RSS_FEEDS))
+                                 else (self.current_feed_index + 1) % len(self.rss_feeds))
                 if prev_feed_idx in self.news_items and self.news_items[prev_feed_idx]:
                     prev_item = self.news_items[prev_feed_idx][0]
                     next_x = 2 + WIDTH * (-self.transition_direction) + offset
@@ -639,21 +665,23 @@ class RSSReaderApp:
 
         # フィード切替通知
         if time.time() - self.feed_switch_time < 2.0:
-            self.draw_feed_notification(draw, RSS_FEEDS[self.current_feed_index]["title"])
+            self.draw_feed_notification(draw, self.rss_feeds[self.current_feed_index]["title"])
 
         return image
 
 # 4) GPIO処理・制御ロジック
     # 次のRSSフィードへ切替
+    # 次のフィードへ切り替える
     def switch_feed(self):
         with self._state_lock:
-            self.current_feed_index = (self.current_feed_index + 1) % len(RSS_FEEDS)
+            self.current_feed_index = (self.current_feed_index + 1) % len(self.rss_feeds)
             self.current_item_index = 0
             self.feed_switch_time = time.time()
             self._reset_article_state(transition_direction=-1)
-        self.log.info(f"Feed switched -> {RSS_FEEDS[self.current_feed_index]['title']}")
+        self.log.info(f"Feed switched -> {self.rss_feeds[self.current_feed_index]['title']}")
 
     # 次の記事へ
+    # 次の記事へ進める
     def move_to_next_article(self):
         with self._state_lock:
             if not self.news_items or self.current_feed_index not in self.news_items or not self.news_items[self.current_feed_index]:
@@ -665,6 +693,7 @@ class RSSReaderApp:
             self._reset_article_state(transition_direction=-1)
 
     # 前の記事へ（関数の呼び出しが掛かってないので、必要に応じてGPIOボタンなどに割り当てるなどをしてください）
+    # 前の記事へ戻す
     def move_to_prev_article(self):
         with self._state_lock:
             if not self.news_items or self.current_feed_index not in self.news_items or not self.news_items[self.current_feed_index]:
@@ -677,6 +706,7 @@ class RSSReaderApp:
 
 
     # 説明文スクロール位置を更新する
+    # 説明文のスクロール位置を更新する
     def update_scroll_position(self) -> None:
         """
         自動スクロールが有効な場合のみ self.scroll_position を増加させる。
@@ -741,11 +771,13 @@ class RSSReaderApp:
             self.move_to_next_article()
 
     @staticmethod
+    # スクロール用イージングを計算する
     def _ease_out_cubic(t: float) -> float:
         t = max(0.0, min(1.0, t))
         return 1 - (1 - t) ** 3
 
     # GPIOポーリング（クリック/ダブルクリック処理）
+    # GPIO入力をポーリングしてクリックを判定する
     async def _gpio_polling_loop(self) -> None:
         GPIO = self._gpio_module
         if GPIO is None:
@@ -780,6 +812,7 @@ class RSSReaderApp:
                 await asyncio.sleep(0.1)
 
     # 時間帯表示制御
+    # 表示時間帯かどうかを判定する
     def is_display_time(self) -> bool:
         now = time.localtime()
         now_hm = now.tm_hour * 60 + now.tm_min
@@ -788,6 +821,7 @@ class RSSReaderApp:
         return start_hm <= now_hm < end_hm
 
     # シグナル／終了処理
+    # 終了シグナルを処理して安全に停止する
     def _signal_handler(self, sig, frame) -> None:
         self.log.info("Exiting...")
         self._stop_event.set()
@@ -806,6 +840,7 @@ class RSSReaderApp:
 
 # 5) メインループ
     # メインループ
+    # 非同期タスクを起動してメインループを実行する
     async def run(self) -> None:
         if self._gpio_available:
             self._background_tasks.append(asyncio.create_task(self._gpio_polling_loop()))
@@ -822,19 +857,23 @@ class RSSReaderApp:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
+    # メインループで更新処理を繰り返す
     async def _main_loop(self) -> None:
         while not self._stop_event.is_set():
             now = time.time()
 
+            # 表示時間外は待機してループを続ける
             if await self._handle_display_window():
                 continue
 
+            # RSS更新・描画・自動切替の処理を実行
             await self._handle_rss_refresh(now)
             self._handle_display_update(now)
             self._handle_auto_feed_switch(now)
 
             await asyncio.sleep(0.01)
 
+    # 表示更新のタイミングを管理する
     def _handle_display_update(self, now: float) -> None:
         if now - self._last_main_update < self.MAIN_UPDATE_INTERVAL:
             return
@@ -847,6 +886,7 @@ class RSSReaderApp:
             self.log.warning(f"OLED display error: {e}")
         self._last_main_update = now
 
+    # 自動フィード切替を管理する
     def _handle_auto_feed_switch(self, now: float) -> None:
         if now - self._last_feed_switch_check < self.FEED_SWITCH_INTERVAL:
             return
@@ -858,6 +898,7 @@ class RSSReaderApp:
         finally:
             self._last_feed_switch_check = now
 
+    # RSS再取得のタイミングを管理する
     async def _handle_rss_refresh(self, now: float) -> None:
         if now - self._last_rss_refresh_attempt < self.RSS_UPDATE_INTERVAL:
             return
@@ -865,6 +906,7 @@ class RSSReaderApp:
         if await self.fetch_rss_feed():
             self.log.info("Feeds refreshed")
 
+    # 表示時間外の待機処理を行う
     async def _handle_display_window(self) -> bool:
         if self.is_display_time():
             return False
@@ -887,6 +929,7 @@ class RSSReaderApp:
         return True
 
 # 6) エントリーポイント
+# アプリのエントリーポイント
 async def main() -> None:
     app = RSSReaderApp()
     try:
@@ -902,5 +945,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
