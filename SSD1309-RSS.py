@@ -122,10 +122,12 @@ def _parse_feed_row(values: List[str], log: logging.Logger, line_no: int) -> Opt
         title, url = values
     elif len(values) == 3:
         title, url, third_value = values[:3]
-        if third_value.isdigit():
-            color = _parse_color_value(third_value, log, line_no)
-        else:
+        try:
+            color = int(third_value)
+        except ValueError:
             feed_type = third_value.lower()
+        else:
+            color = _parse_color_value(third_value, log, line_no)
 
     else:
         title, url, color_value, feed_type_value = values[:4]
@@ -276,6 +278,7 @@ class RSSReaderApp:
         *,
         keep_feed_idx: Optional[int] = None,
         keep_item_idx: Optional[int] = None,
+        keep_link: Optional[str] = None,
     ) -> None:
         self.scroll_position = 0.0
         self.transition_effect = self.TRANSITION_FRAMES
@@ -284,12 +287,18 @@ class RSSReaderApp:
         self.auto_scroll_paused = True
         self._scroll_ease_elapsed = 0.0
         self._last_scroll_time = time.monotonic()
-        if keep_feed_idx is not None and keep_item_idx is not None:
-            self._desc_width_cache = {
-                key: value
-                for key, value in self._desc_width_cache.items()
-                if key[0] == keep_feed_idx and key[2] == keep_item_idx
-            }
+        if keep_feed_idx is not None and keep_item_idx is not None and keep_link is not None:
+            keys_to_delete = [
+                key
+                for key in self._desc_width_cache
+                if not (
+                    key[0] == keep_feed_idx
+                    and key[1] == keep_link
+                    and key[2] == keep_item_idx
+                )
+            ]
+            for key in keys_to_delete:
+                self._desc_width_cache.pop(key, None)
 
 # 1) 初期化処理
     # 初期化
@@ -761,10 +770,20 @@ class RSSReaderApp:
             self._prev_feed_index = prev_feed
             self._prev_item_index = prev_item
             self.feed_switch_time = time.monotonic()
+            keep_link = None
+            if (
+                self.news_items
+                and self.current_feed_index in self.news_items
+                and self.news_items[self.current_feed_index]
+            ):
+                keep_link = self.news_items[self.current_feed_index][
+                    self.current_item_index
+                ].get("link", "")
             self._reset_article_state(
                 transition_direction=-1,
                 keep_feed_idx=self.current_feed_index,
                 keep_item_idx=self.current_item_index,
+                keep_link=keep_link,
             )
         self.log.info(f"Feed switched -> {self.rss_feeds[self.current_feed_index]['title']}")
 
@@ -782,10 +801,15 @@ class RSSReaderApp:
                 self.current_item_index = 0
             self._prev_feed_index = prev_feed
             self._prev_item_index = prev_item
+            keep_link = self.news_items[self.current_feed_index][self.current_item_index].get(
+                "link",
+                "",
+            )
             self._reset_article_state(
                 transition_direction=-1,
                 keep_feed_idx=self.current_feed_index,
                 keep_item_idx=self.current_item_index,
+                keep_link=keep_link,
             )
 
     # 前の記事へ（関数の呼び出しが掛かってないので、必要に応じてGPIOボタンなどに割り当てるなどをしてください）
@@ -802,10 +826,15 @@ class RSSReaderApp:
                 self.current_item_index = len(self.news_items[self.current_feed_index]) - 1
             self._prev_feed_index = prev_feed
             self._prev_item_index = prev_item
+            keep_link = self.news_items[self.current_feed_index][self.current_item_index].get(
+                "link",
+                "",
+            )
             self._reset_article_state(
                 transition_direction=1,
                 keep_feed_idx=self.current_feed_index,
                 keep_item_idx=self.current_item_index,
+                keep_link=keep_link,
             )
 
 
@@ -1115,6 +1144,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
