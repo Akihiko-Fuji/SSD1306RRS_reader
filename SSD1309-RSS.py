@@ -7,7 +7,7 @@ SSD1309/SSD1306 OLED RSSリーダー (I2C/SPI両対応)
 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 作成者        : Akihiko Fuji
 更新日        : 2026/01/12
-バージョン    : 1.7.2
+バージョン    : 1.8
 ------------------------------------------------
 Raspberry Pi + luma.oled環境で動作する日本語対応RSSビューワー。
 複数RSSソースを巡回し、記事を自動スクロール表示します。
@@ -68,6 +68,19 @@ class AnimationSettings:
 class DisplaySettings:
     sleep_interval: int = 30
 
+@dataclass(frozen=True)
+class AppConfig:
+    rss_update_interval: float = 1800.0      # 秒｜RSSを再取得する間隔（30分ごとに最新化）
+    feed_switch_interval: float = 600.0      # 秒｜フィード自動切替の間隔（10分で次のフィードへ）
+    article_display_time: float = 25.0       # 秒｜短文（スクロール不要）の記事を次へ送るまでの待機時間
+    pause_at_start: float = 3.0              # 秒｜記事表示直後のスクロール一時停止（読み始めの“間”を作る）
+    transition_frames: float = 15.0          # フレーム数｜フィード/記事切替アニメの尺（多いほどゆっくり）
+    gpio_poll_interval: float = 0.02         # 秒｜GPIOポーリング周期（クリック検出のサンプリング間隔）
+    main_update_interval: float = 0.1        # 秒｜描画更新周期（CPU負荷と滑らかさのトレードオフ）
+    double_click_interval: float = 0.6       # 秒｜ダブルクリック判定の間隔（この時間内の2押しでダブル扱い）
+    debounce_sec: float = 0.05               # 秒｜ボタンのチャタリング除去時間
+    long_press_interval: float = 1.5         # 秒｜長押し判定時間（消灯/点灯の切替）
+
 # ログ設定
 # ログ出力設定を初期化する
 def setup_logging() -> logging.Logger:
@@ -126,8 +139,6 @@ def _parse_feed_row(values: List[str], log: logging.Logger, line_no: int) -> Opt
             color = int(third_value)
         except ValueError:
             feed_type = third_value.lower()
-        else:
-            color = _parse_color_value(third_value, log, line_no)
 
     else:
         title, url, color_value, feed_type_value = values[:4]
@@ -187,6 +198,11 @@ DISPLAY_TIME_END =  (18, 0)
 USE_SPI = False
 
 class RSSReaderApp:
+    """RSSリーダーのメインアプリケーション。
+
+    self.rss_feeds はフィード定義の配列で、self.news_items は feed index をキーに持つ取得済み記事リスト。
+    フィードの順序（index）は起動中に不変であり、self.news_items のキーは self.rss_feeds の index と一致する。
+    """
     # 主要変数と状態を初期化
     # アプリの初期状態と設定を構築する
     def __init__(self):
@@ -210,26 +226,16 @@ class RSSReaderApp:
         self.cache_settings = CacheSettings()
         self.animation_settings = AnimationSettings()
         self.display_settings = DisplaySettings()
-
-        # 設定（変更しやすい値をクラス属性に集約）
-        self.RSS_UPDATE_INTERVAL = 1800           # 秒｜RSSを再取得する間隔（30分ごとに最新化）
-        self.FEED_SWITCH_INTERVAL = 600           # 秒｜フィード自動切替の間隔（10分で次のフィードへ）
-        self.ARTICLE_DISPLAY_TIME = 25.0          # 秒｜短文（スクロール不要）の記事を次へ送るまでの待機時間
-        self.PAUSE_AT_START = 3.0                 # 秒｜記事表示直後のスクロール一時停止（読み始めの“間”を作る）
-        self.TRANSITION_FRAMES = 15               # フレーム数｜フィード/記事切替アニメの尺（多いほどゆっくり）
-        self.GPIO_POLL_INTERVAL = 0.02            # 秒｜GPIOポーリング周期（クリック検出のサンプリング間隔）
-        self.MAIN_UPDATE_INTERVAL = 0.1           # 秒｜描画更新周期（CPU負荷と滑らかさのトレードオフ）
-        self.DOUBLE_CLICK_INTERVAL = 0.6          # 秒｜ダブルクリック判定の間隔（この時間内の2押しでダブル扱い）
-        self._debounce_sec = 0.05                 # 秒｜ボタンのチャタリング除去時間
-        self.LONG_PRESS_INTERVAL = 1.5           # 秒｜長押し判定時間（消灯/点灯の切替）
+        self.config = AppConfig()
 
         # 状態（可変）
+        # 時間計測は time.monotonic を使用し、表示用時刻は time.localtime/strftime を使う。
         self.news_items: Dict[int, List[Dict[str, Any]]] = {}  # 取得済みRSSをフィードindexごとに保持
         self.current_feed_index: int = 0          # 現在表示中のフィードindex
         self.current_item_index: int = 0          # 現在表示中の記事index（当該フィード内）
         self.scroll_position: float = 0.0         # 説明文のスクロール位置（px）
         self.article_start_time: float = 0.0      # 現記事の表示開始モノトニック秒（PAUSE判定や経過時間計算に使用）
-        self.auto_scroll_paused: bool = True      # Trueの間は説明文スクロールを停止（PAUSE_AT_STARTで解除）
+        self.auto_scroll_paused: bool = True      # Trueの間は説明文スクロールを停止（pause_at_startで解除）
         self.feed_switch_time: float = 0.0        # 直近のフィード切替モノトニック秒（中央通知の表示条件に利用）
         self.loading_effect: int = 0              # ローディング演出の残カウンタ（0で非表示）
         self.transition_effect: float = 0.0       # 切替アニメの残フレーム量（>0の間はスライド描画）
@@ -244,8 +250,8 @@ class RSSReaderApp:
         self.failover_snapshot: Dict[int, List[Dict[str, Any]]] = {}
 
         # スケジューラ／タイマー代替：メインループ内の時刻管理
-        self._last_main_update: float = 0.0       # 直近の描画更新実行時刻（MAIN_UPDATE_INTERVAL判定用）
-        self._last_feed_switch_check: float = 0.0 # 直近のフィード切替チェック時刻（FEED_SWITCH_INTERVAL判定用）
+        self._last_main_update: float = 0.0       # 直近の描画更新実行時刻（main_update_interval判定用）
+        self._last_feed_switch_check: float = 0.0 # 直近のフィード切替チェック時刻（feed_switch_interval判定用）
         self._last_rss_refresh_attempt: float = 0.0
         self._last_scroll_time: float = 0.0
         self._scroll_ease_elapsed: float = 0.0
@@ -265,7 +271,7 @@ class RSSReaderApp:
         self._long_press_handled = False          # 長押し処理済みフラグ
         self._display_enabled = True              # True=表示点灯、False=消灯
         self._display_blank_drawn = False         # 消灯時にブランクを描画済みか
-        self._user_agent = "SSD1309-RSS/1.7.2 (+https://github.com/)"  # RSS取得のUser-Agent
+        self._user_agent = "SSD1309-RSS/1.8 (+https://github.com/)"  # RSS取得のUser-Agent
 
         # ロック（必要最小限）
         self._state_lock = threading.Lock()
@@ -281,7 +287,7 @@ class RSSReaderApp:
         keep_link: Optional[str] = None,
     ) -> None:
         self.scroll_position = 0.0
-        self.transition_effect = self.TRANSITION_FRAMES
+        self.transition_effect = self.config.transition_frames
         self.transition_direction = transition_direction
         self.article_start_time = time.monotonic()
         self.auto_scroll_paused = True
@@ -723,7 +729,7 @@ class RSSReaderApp:
         # トランジション中：記事を横スクロールで切替
         elif self.transition_effect > 0:
             self.transition_effect -= 1.5
-            progress = self.transition_effect / self.TRANSITION_FRAMES
+            progress = self.transition_effect / self.config.transition_frames
             offset = int(WIDTH * progress * self.transition_direction)
             if (
                 news_items
@@ -770,7 +776,7 @@ class RSSReaderApp:
             self._prev_feed_index = prev_feed
             self._prev_item_index = prev_item
             self.feed_switch_time = time.monotonic()
-            keep_link = None
+            keep_link = ""
             if (
                 self.news_items
                 and self.current_feed_index in self.news_items
@@ -859,9 +865,9 @@ class RSSReaderApp:
             current_time = time.monotonic()
             elapsed_time = current_time - self.article_start_time
 
-            # 表示開始直後は一時停止（PAUSE_AT_START 秒）
+            # 表示開始直後は一時停止（pause_at_start 秒）
             if self.auto_scroll_paused:
-                if elapsed_time >= self.PAUSE_AT_START:
+                if elapsed_time >= self.config.pause_at_start:
                     self.auto_scroll_paused = False
                     self._scroll_ease_elapsed = 0.0
                     self._last_scroll_time = current_time
@@ -875,9 +881,9 @@ class RSSReaderApp:
                 desc_width = self.get_text_width(desc, self.FONT) if desc else 0
                 self._desc_width_cache[cache_key] = desc_width
 
-            # 短文（スクロール不要）は ARTICLE_DISPLAY_TIME 経過で次記事へ
+            # 短文（スクロール不要）は article_display_time 経過で次記事へ
             short_text = desc_width <= (WIDTH - 4)
-            ready_to_advance = elapsed_time >= self.ARTICLE_DISPLAY_TIME if short_text else False
+            ready_to_advance = elapsed_time >= self.config.article_display_time if short_text else False
 
         if short_text:
             if ready_to_advance:
@@ -885,7 +891,11 @@ class RSSReaderApp:
             return
 
         now = time.monotonic()
-        delta_time = now - self._last_scroll_time if self._last_scroll_time else self.MAIN_UPDATE_INTERVAL
+        delta_time = (
+            now - self._last_scroll_time
+            if self._last_scroll_time
+            else self.config.main_update_interval
+        )
         self._last_scroll_time = now
         self._scroll_ease_elapsed = min(
             self._scroll_ease_elapsed + delta_time,
@@ -898,7 +908,7 @@ class RSSReaderApp:
         )
         ease = self._ease_out_cubic(progress)
         frame_factor = (
-            delta_time / self.MAIN_UPDATE_INTERVAL if self.MAIN_UPDATE_INTERVAL else 1.0
+            delta_time / self.config.main_update_interval if self.config.main_update_interval else 1.0
         )
         increment = self.animation_settings.scroll_speed * ease * frame_factor
 
@@ -930,29 +940,29 @@ class RSSReaderApp:
                 state = GPIO.input(BUTTON_FEED)
                 now = time.monotonic()
                 if self._prev_button_state == 1 and state == 0:
-                    if now - self._last_edge_time < self._debounce_sec:
+                    if now - self._last_edge_time < self.config.debounce_sec:
                         self._prev_button_state = state
-                        await asyncio.sleep(self.GPIO_POLL_INTERVAL)
+                        await asyncio.sleep(self.config.gpio_poll_interval)
                         continue
                     self._last_edge_time = now
                     self._press_start_time = now
                     self._long_press_handled = False
 
                 if state == 0 and not self._long_press_handled:
-                    if now - self._press_start_time >= self.LONG_PRESS_INTERVAL:
+                    if now - self._press_start_time >= self.config.long_press_interval:
                         self._set_display_enabled(not self._display_enabled)
                         self._long_press_handled = True
                         self._click_count = 0
                         self._last_press_time = 0.0
 
                 if self._prev_button_state == 0 and state == 1:
-                    if now - self._last_edge_time < self._debounce_sec:
+                    if now - self._last_edge_time < self.config.debounce_sec:
                         self._prev_button_state = state
-                        await asyncio.sleep(self.GPIO_POLL_INTERVAL)
+                        await asyncio.sleep(self.config.gpio_poll_interval)
                         continue
                     self._last_edge_time = now
                     if not self._long_press_handled:
-                        if now - self._last_press_time <= self.DOUBLE_CLICK_INTERVAL:
+                        if now - self._last_press_time <= self.config.double_click_interval:
                             self._click_count += 1
                         else:
                             self._click_count = 1
@@ -960,7 +970,7 @@ class RSSReaderApp:
                     else:
                         self._click_count = 0
 
-                if self._click_count > 0 and (now - self._last_press_time) > self.DOUBLE_CLICK_INTERVAL:
+                if self._click_count > 0 and (now - self._last_press_time) > self.config.double_click_interval:
                     if self._click_count == 1:
                         self.move_to_next_article()
                         self.log.info("[GPIO] Single click -> next article")
@@ -970,7 +980,7 @@ class RSSReaderApp:
                     self._click_count = 0
 
                 self._prev_button_state = state
-                await asyncio.sleep(self.GPIO_POLL_INTERVAL)
+                await asyncio.sleep(self.config.gpio_poll_interval)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1064,7 +1074,7 @@ class RSSReaderApp:
 
     # 表示更新のタイミングを管理する
     def _handle_display_update(self, now: float) -> None:
-        if now - self._last_main_update < self.MAIN_UPDATE_INTERVAL:
+        if now - self._last_main_update < self.config.main_update_interval:
             return
 
         if not self._display_enabled:
@@ -1083,7 +1093,7 @@ class RSSReaderApp:
 
     # 自動フィード切替を管理する
     def _handle_auto_feed_switch(self, now: float) -> None:
-        if now - self._last_feed_switch_check < self.FEED_SWITCH_INTERVAL:
+        if now - self._last_feed_switch_check < self.config.feed_switch_interval:
             return
 
         try:
@@ -1095,7 +1105,7 @@ class RSSReaderApp:
 
     # RSS再取得のタイミングを管理する
     async def _handle_rss_refresh(self, now: float) -> None:
-        if now - self._last_rss_refresh_attempt < self.RSS_UPDATE_INTERVAL:
+        if now - self._last_rss_refresh_attempt < self.config.rss_update_interval:
             return
 
         if await self.fetch_rss_feed():
@@ -1144,6 +1154,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
