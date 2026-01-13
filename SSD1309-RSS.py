@@ -815,7 +815,7 @@ class RSSReaderApp:
         else:
             self._draw_empty_state(draw)
 
-     # フィード切替通知
+        # フィード切替通知
         if time.monotonic() - self.feed_switch_time < 2.0:
             self.draw_feed_notification(draw, current_feed)
 
@@ -1211,6 +1211,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
