@@ -96,6 +96,19 @@ DEFAULT_RSS_FEEDS = [
 ]
 
 
+# rss-read.meの色設定を解析する
+def _parse_color_value(color_value: str, log: logging.Logger, line_no: int) -> int:
+    try:
+        return int(color_value)
+    except ValueError:
+        log.warning(
+            "Invalid color value '%s' in rss-read.me line %d; using default 1",
+            color_value,
+            line_no,
+        )
+        return 1
+
+
 # rss-read.meの1行を解析してフィード情報を作る
 def _parse_feed_row(values: List[str], log: logging.Logger, line_no: int) -> Optional[Dict[str, Any]]:
     title = ""
@@ -109,26 +122,11 @@ def _parse_feed_row(values: List[str], log: logging.Logger, line_no: int) -> Opt
         title, url = values
     elif len(values) == 3:
         title, url, color_value = values[:3]
-        try:
-            color = int(color_value)
-        except ValueError:
-            log.warning(
-                "Invalid color value '%s' in rss-read.me line %d; using default 1",
-                color_value,
-                line_no,
-            )
-            color = 1
+        color = _parse_color_value(color_value, log, line_no)
+ 
     else:
         title, url, color_value, feed_type_value = values[:4]
-        try:
-            color = int(color_value)
-        except ValueError:
-            log.warning(
-                "Invalid color value '%s' in rss-read.me line %d; using default 1",
-                color_value,
-                line_no,
-            )
-            color = 1
+        color = _parse_color_value(color_value, log, line_no)
         if feed_type_value:
             feed_type = feed_type_value.lower()
     if feed_type not in ("rss", "text"):
@@ -443,25 +441,22 @@ class RSSReaderApp:
 
         feed = feedparser.parse(text)
         entries = getattr(feed, "entries", [])[:10]
-        feed_items: List[Dict[str, Any]] = []
-        for entry in entries:
-            title = getattr(entry, "title", "")
-            desc = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
-            desc = re.sub(r"<[^>]+>", "", desc)
-            published = getattr(entry, "published", "")
-            link = getattr(entry, "link", "")
-            feed_items.append(
-                {
-                    "title": title,
-                    "description": desc,
-                    "published": published,
-                    "link": link,
-                    "feed_title": feed_info["title"],
-                    "feed_color": feed_info["color"],
-                    "feed_index": idx,
-                }
+        feed_items = [
+            self._build_feed_item(
+                feed_info,
+                idx,
+                title=getattr(entry, "title", ""),
+                description=self._sanitize_description(
+                    getattr(entry, "summary", "")
+                    or getattr(entry, "description", "")
+                    or ""
+                ),
+                published=getattr(entry, "published", ""),
+                link=getattr(entry, "link", ""),
             )
-        self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
+            for entry in entries
+        ]
+         self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
         return idx, feed_items, None
 
     # テキスト形式のフィードを取得して整形する
@@ -480,15 +475,12 @@ class RSSReaderApp:
             text = await asyncio.to_thread(self._read_text_file, source)
 
         description = text.strip()
-        item = {
-            "title": feed_info["title"],
-            "description": description,
-            "published": "",
-            "link": "",
-            "feed_title": feed_info["title"],
-            "feed_color": feed_info["color"],
-            "feed_index": idx,
-        }
+        item = self._build_feed_item(
+            feed_info,
+            idx,
+            title=feed_info["title"],
+            description=description,
+        )
         self.log.info(f" -> {feed_info['title']}: 1 item (text)")
         return idx, [item], None
 
@@ -499,6 +491,31 @@ class RSSReaderApp:
             raise FileNotFoundError(f"Text source not found: {source}")
         return path.read_text(encoding="utf-8")
 
+     def _build_feed_item(
+        self,
+        feed_info: Dict[str, Any],
+        idx: int,
+        *,
+        title: str,
+        description: str,
+        published: str = "",
+        link: str = "",
+    ) -> Dict[str, Any]:
+        return {
+            "title": title,
+            "description": description,
+            "published": published,
+            "link": link,
+            "feed_title": feed_info["title"],
+            "feed_color": feed_info["color"],
+            "feed_index": idx,
+        }
+
+    @staticmethod
+    def _sanitize_description(description: str) -> str:
+        return re.sub(r"<[^>]+>", "", description)
+
+ 
     # 取得結果をキャッシュへ反映する
     def _update_cache(self, new_data: Dict[int, List[Dict[str, Any]]]) -> None:
         for idx, items in new_data.items():
@@ -572,14 +589,29 @@ class RSSReaderApp:
 
     # 記事本文とタイトルを描画する
     # 記事のタイトルと本文を描画する
-    def draw_article_content(self, draw: ImageDraw.ImageDraw, item: Dict[str, Any], base_x: int, base_y: int, highlight_title: bool = False,) -> int:
+    def draw_article_content(
+        self,
+        draw: ImageDraw.ImageDraw,
+        item: Dict[str, Any],
+        base_x: int,
+        base_y: int,
+        highlight_title: bool = False,
+    ) -> int:
         title = item["title"]
         title_wrapped = textwrap.wrap(title, width=20)
         y_pos = base_y
         for i, line in enumerate(title_wrapped[:2]):
             if highlight_title:
                 title_width = self.get_text_width(line, self.FONT)
-                draw.rectangle((base_x - 2, y_pos - 1, base_x + title_width + 2, y_pos + 11), fill=1)
+                draw.rectangle(
+                    (
+                        base_x - 2,
+                        y_pos - 1,
+                        base_x + title_width + 2,
+                        y_pos + 11,
+                    ),
+                    fill=1,
+                )
                 draw.text((base_x, y_pos), line, font=self.FONT, fill=0)
             else:
                 draw.text((base_x, y_pos), line, font=self.FONT, fill=1)
@@ -945,3 +977,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
