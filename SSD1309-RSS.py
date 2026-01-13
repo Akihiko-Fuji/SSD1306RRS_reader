@@ -121,9 +121,12 @@ def _parse_feed_row(values: List[str], log: logging.Logger, line_no: int) -> Opt
     elif len(values) == 2:
         title, url = values
     elif len(values) == 3:
-        title, url, color_value = values[:3]
-        color = _parse_color_value(color_value, log, line_no)
- 
+        title, url, third_value = values[:3]
+        if third_value.isdigit():
+            color = _parse_color_value(third_value, log, line_no)
+        else:
+            feed_type = third_value.lower()
+
     else:
         title, url, color_value, feed_type_value = values[:4]
         color = _parse_color_value(color_value, log, line_no)
@@ -467,9 +470,9 @@ class RSSReaderApp:
     ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
         async with session.get(feed_info["url"]) as response:
             response.raise_for_status()
-            text = await response.text()
+            payload = await response.read()
 
-        feed = feedparser.parse(text)
+        feed = feedparser.parse(payload)
         entries = getattr(feed, "entries", [])[:10]
         feed_items = [
             self._build_feed_item(
@@ -952,7 +955,9 @@ class RSSReaderApp:
         now_hm = now.tm_hour * 60 + now.tm_min
         start_hm = DISPLAY_TIME_START[0] * 60 + DISPLAY_TIME_START[1]
         end_hm = DISPLAY_TIME_END[0] * 60 + DISPLAY_TIME_END[1]
-        return start_hm <= now_hm < end_hm
+        if start_hm <= end_hm:
+            return start_hm <= now_hm < end_hm
+        return now_hm >= start_hm or now_hm < end_hm
 
     # シグナル／終了処理
     # 終了シグナルを処理して安全に停止する
@@ -1110,6 +1115,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
