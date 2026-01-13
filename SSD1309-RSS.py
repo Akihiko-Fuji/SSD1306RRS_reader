@@ -54,7 +54,9 @@ HEIGHT = 64
 
 # フォントファイル名（同一フォルダ内）
 TITLE_FONT_FILENAME = "JF-Dot-MPlusH10.ttf"
-MAIN_FONT_FILENAME = "JF-Dot-MPlusH12.ttf"
+MAIN_FONT_FILENAME  = "JF-Dot-MPlusH12.ttf"
+TITLE_FONT_SIZE     = 10
+MAIN_FONT_SIZE      = 12
 
 # 送りやフィードに利用するGPIOピン（BCM）
 BUTTON_FEED = 18
@@ -68,19 +70,40 @@ USER_AGENT = "SSD1309-RSS/1.8 (+https://github.com/)"
 USE_SPI = False
 
 # SPI/I2C パラメータ
-SPI_PORT = 0
-SPI_DEVICE = 0
-SPI_GPIO_DC = 24
+SPI_PORT     = 0
+SPI_DEVICE   = 0
+SPI_GPIO_DC  = 24
 SPI_GPIO_RST = 25
-I2C_PORT = 1
-I2C_ADDRESS = 0x3C
+I2C_PORT     = 1
+I2C_ADDRESS  = 0x3C
 
 # OLED表示設定
 OLED_CONTRAST = 0xFF
 
 # 画面表示時間の設定 8:30 - 18:00 のみ利用するとしている
-DISPLAY_TIME_START = (8, 30)
-DISPLAY_TIME_END =  (18, 0)
+DISPLAY_TIME_START = ( 8, 30)
+DISPLAY_TIME_END   = (18, 00)
+
+# 表示レイアウト/描画に関する設定
+TITLE_WRAP_WIDTH          = 20
+TITLE_LINE_HEIGHT         = 12
+HEADER_HEIGHT             = 14
+HEADER_CONTENT_PADDING_Y  = 2
+DESC_BACKGROUND_HEIGHT    = 14
+TITLE_DESC_MARGIN_Y       = 2
+LOADING_EFFECT_TICKS      = 10
+LOADING_BAR_COUNT         = 20
+LOADING_SEGMENT_WIDTH     = 6
+FEED_SWITCH_NOTICE_OFFSET = 10
+TRANSITION_FRAME_STEP     = 1.5
+
+# 表示メッセージ
+LOADING_MESSAGE = "ニュースを読み込み中..."
+NO_NEWS_MESSAGE = "ニュースがありません"
+UNKNOWN_FEED_TITLE = "Unknown Feed"
+
+# RSS取得/整形の設定
+RSS_ENTRY_LIMIT = 10
 
 # RSSフィード（rss-read.meが未配置/空のときに使われるデフォルト）
 DEFAULT_RSS_FEEDS = [
@@ -103,9 +126,9 @@ class CacheSettings:
 
 @dataclass(frozen=True)
 class AnimationSettings:
-    scroll_speed: float = 4.0
+    scroll_speed: float    = 4.0
     easing_duration: float = 0.8
-    tail_margin_px: int = 24
+    tail_margin_px: int    = 24
 
 @dataclass(frozen=True)
 class DisplaySettings:
@@ -124,16 +147,16 @@ class FeedItem(TypedDict):
 
 @dataclass(frozen=True)
 class AppConfig:
-    rss_update_interval: float = 1800.0      # 秒｜RSSを再取得する間隔（30分ごとに最新化）
-    feed_switch_interval: float = 600.0      # 秒｜フィード自動切替の間隔（10分で次のフィードへ）
-    article_display_time: float = 25.0       # 秒｜短文（スクロール不要）の記事を次へ送るまでの待機時間
-    pause_at_start: float = 3.0              # 秒｜記事表示直後のスクロール一時停止（読み始めの“間”を作る）
-    transition_frames: float = 15.0          # フレーム数｜フィード/記事切替アニメの尺（多いほどゆっくり）
-    gpio_poll_interval: float = 0.02         # 秒｜GPIOポーリング周期（クリック検出のサンプリング間隔）
-    main_update_interval: float = 0.1        # 秒｜描画更新周期（CPU負荷と滑らかさのトレードオフ）
+    rss_update_interval: float   = 1800.0    # 秒｜RSSを再取得する間隔（30分ごとに最新化）
+    feed_switch_interval: float  = 600.0     # 秒｜フィード自動切替の間隔（10分で次のフィードへ）
+    article_display_time: float  = 25.0      # 秒｜短文（スクロール不要）の記事を次へ送るまでの待機時間
+    pause_at_start: float        = 3.0       # 秒｜記事表示直後のスクロール一時停止（読み始めの“間”を作る）
+    transition_frames: float     = 15.0      # フレーム数｜フィード/記事切替アニメの尺（多いほどゆっくり）
+    gpio_poll_interval: float    = 0.02      # 秒｜GPIOポーリング周期（クリック検出のサンプリング間隔）
+    main_update_interval: float  = 0.1       # 秒｜描画更新周期（CPU負荷と滑らかさのトレードオフ）
     double_click_interval: float = 0.6       # 秒｜ダブルクリック判定の間隔（この時間内の2押しでダブル扱い）
-    debounce_sec: float = 0.05               # 秒｜ボタンのチャタリング除去時間
-    long_press_interval: float = 1.5         # 秒｜長押し判定時間（消灯/点灯の切替）
+    debounce_sec: float          = 0.05      # 秒｜ボタンのチャタリング除去時間
+    long_press_interval: float   = 1.5       # 秒｜長押し判定時間（消灯/点灯の切替）
 
 # ログ設定
 # ログ出力設定を初期化する
@@ -263,17 +286,17 @@ class RSSReaderApp:
         # 状態（可変）
         # 時間計測は time.monotonic を使用し、表示用時刻は time.localtime/strftime を使う。
         self.news_items: Dict[int, List[FeedItem]] = {}  # 取得済みRSSをフィードindexごとに保持
-        self.current_feed_index: int = 0          # 現在表示中のフィードindex
-        self.current_item_index: int = 0          # 現在表示中の記事index（当該フィード内）
-        self.scroll_position: float = 0.0         # 説明文のスクロール位置（px）
+        self.current_feed_index: int   = 0        # 現在表示中のフィードindex
+        self.current_item_index: int   = 0        # 現在表示中の記事index（当該フィード内）
+        self.scroll_position: float    = 0.0      # 説明文のスクロール位置（px）
         self.article_start_time: float = 0.0      # 現記事の表示開始モノトニック秒（PAUSE判定や経過時間計算に使用）
-        self.auto_scroll_paused: bool = True      # Trueの間は説明文スクロールを停止（pause_at_startで解除）
-        self.feed_switch_time: float = 0.0        # 直近のフィード切替モノトニック秒（中央通知の表示条件に利用）
-        self.loading_effect: int = 0              # ローディング演出の残カウンタ（0で非表示）
-        self.transition_effect: float = 0.0       # 切替アニメの残フレーム量（>0の間はスライド描画）
+        self.auto_scroll_paused: bool  = True     # Trueの間は説明文スクロールを停止（pause_at_startで解除）
+        self.feed_switch_time: float   = 0.0      # 直近のフィード切替モノトニック秒（中央通知の表示条件に利用）
+        self.loading_effect: int       = 0        # ローディング演出の残カウンタ（0で非表示）
+        self.transition_effect: float  = 0.0      # 切替アニメの残フレーム量（>0の間はスライド描画）
         self.transition_direction: int = 1        # 切替方向（1:右へ／-1:左へ）アニメのオフセット符号に使用
-        self._prev_feed_index: int = 0            # 直前に表示していたフィード
-        self._prev_item_index: int = 0            # 直前に表示していた記事
+        self._prev_feed_index: int     = 0        # 直前に表示していたフィード
+        self._prev_item_index: int     = 0        # 直前に表示していた記事
 
         self.feed_cache: Dict[int, Deque[FeedItem]] = {
             idx: deque(maxlen=self.cache_settings.max_items)
@@ -282,12 +305,12 @@ class RSSReaderApp:
         self.failover_snapshot: Dict[int, List[FeedItem]] = {}
 
         # スケジューラ／タイマー代替：メインループ内の時刻管理
-        self._last_main_update: float = 0.0       # 直近の描画更新実行時刻（main_update_interval判定用）
+        self._last_main_update: float       = 0.0 # 直近の描画更新実行時刻（main_update_interval判定用）
         self._last_feed_switch_check: float = 0.0 # 直近のフィード切替チェック時刻（feed_switch_interval判定用）
+        self._last_scroll_time: float       = 0.0
+        self._scroll_ease_elapsed: float    = 0.0
         self._last_rss_refresh_attempt: float = 0.0
-        self._last_scroll_time: float = 0.0
-        self._scroll_ease_elapsed: float = 0.0
-
+     
         # GPIO用
         self._gpio_available = False              # TrueならGPIO使用可能（環境により未接続/未導入の考慮）
         self._stop_event = threading.Event()      # 終了シグナル（スレッド/ループの安全停止に利用）
@@ -295,13 +318,13 @@ class RSSReaderApp:
         self._gpio_module = None
 
         # クリック検出（ポーリング方式に統一）
-        self._prev_button_state = 1               # 直前のボタン状態（1:未押下, 0:押下）
-        self._last_press_time = 0.0               # 直近の押下時刻（単/ダブルクリックの時間間隔判定に使用）
-        self._last_edge_time = 0.0                # 直近のエッジ時刻（チャタリング抑止）
-        self._click_count = 0                     # クリック回数カウント（1=シングル, 2=ダブル）
-        self._press_start_time = 0.0              # ボタン押下開始時刻
-        self._long_press_handled = False          # 長押し処理済みフラグ
-        self._display_enabled = True              # True=表示点灯、False=消灯
+        self._prev_button_state   = 1             # 直前のボタン状態（1:未押下, 0:押下）
+        self._last_press_time     = 0.0           # 直近の押下時刻（単/ダブルクリックの時間間隔判定に使用）
+        self._last_edge_time      = 0.0           # 直近のエッジ時刻（チャタリング抑止）
+        self._click_count         = 0             # クリック回数カウント（1=シングル, 2=ダブル）
+        self._press_start_time    = 0.0           # ボタン押下開始時刻
+        self._long_press_handled  = False         # 長押し処理済みフラグ
+        self._display_enabled     = True          # True=表示点灯、False=消灯
         self._display_blank_drawn = False         # 消灯時にブランクを描画済みか
         self._user_agent = "SSD1309-RSS/1.8 (+https://github.com/)"  # RSS取得のUser-Agent
 
@@ -348,7 +371,7 @@ class RSSReaderApp:
         self._install_signal_handlers()
         monotonic_now = time.monotonic()
         self.article_start_time = monotonic_now
-        self.feed_switch_time = monotonic_now - 10  # 初回通知オフセット
+        self.feed_switch_time = monotonic_now - FEED_SWITCH_NOTICE_OFFSET  # 初回通知オフセット
         self._last_main_update = monotonic_now
         self._last_feed_switch_check = monotonic_now
         self._last_rss_refresh_attempt = monotonic_now
@@ -363,8 +386,8 @@ class RSSReaderApp:
             font_dir = os.path.dirname(os.path.abspath(__file__))
             title_font_file = os.path.join(font_dir, TITLE_FONT_FILENAME)
             main_font_file = os.path.join(font_dir, MAIN_FONT_FILENAME)
-            self.TITLE_FONT = ImageFont.truetype(title_font_file, 10)
-            self.FONT = ImageFont.truetype(main_font_file, 12)
+            self.TITLE_FONT = ImageFont.truetype(title_font_file, TITLE_FONT_SIZE)
+            self.FONT = ImageFont.truetype(main_font_file, MAIN_FONT_SIZE)
             self.log.info("Fonts loaded")
         except OSError as e:
             self.log.error(f"Font loading error: {e} -> using default fonts")
@@ -439,7 +462,7 @@ class RSSReaderApp:
         self.log.info(
             f"Fetching RSS feeds... (timeout={settings.timeout}s, attempts={total_attempts})"
         )
-        self.loading_effect = 10
+        self.loading_effect = LOADING_EFFECT_TICKS
 
         # リトライしながらRSS取得を試みる
         for attempt in range(1, total_attempts + 1):
@@ -528,7 +551,7 @@ class RSSReaderApp:
             payload = await response.read()
 
         feed = feedparser.parse(payload)
-        entries = getattr(feed, "entries", [])[:10]
+        entries = getattr(feed, "entries", [])[:RSS_ENTRY_LIMIT]
         feed_items = [
             self._build_feed_item(
                 feed_info,
@@ -589,7 +612,7 @@ class RSSReaderApp:
         published: str = "",
         link: str = "",
     ) -> FeedItem:
-        title_lines = textwrap.wrap(title, width=20)
+        title_lines = textwrap.wrap(title, width=TITLE_WRAP_WIDTH)
         return {
             "title": title,
             "description": description,
@@ -689,7 +712,7 @@ class RSSReaderApp:
         base_y: int,
         highlight_title: bool = False,
     ) -> int:
-        title_wrapped = item.get("title_lines") or textwrap.wrap(item["title"], width=20)
+        title_wrapped = item.get("title_lines") or textwrap.wrap(item["title"], width=TITLE_WRAP_WIDTH)
         y_pos = base_y
         for i, line in enumerate(title_wrapped[:2]):
             if highlight_title:
@@ -706,11 +729,12 @@ class RSSReaderApp:
                 draw.text((base_x, y_pos), line, font=self.FONT, fill=0)
             else:
                 draw.text((base_x, y_pos), line, font=self.FONT, fill=1)
-            y_pos += 12
-        y_pos = base_y + (24 if len(title_wrapped) >= 2 else 12)
+            y_pos += TITLE_LINE_HEIGHT
+        title_block_height = TITLE_LINE_HEIGHT * (2 if len(title_wrapped) >= 2 else 1)
+        y_pos = base_y + title_block_height
         draw.line([(base_x, y_pos + 1), (base_x + WIDTH - 4, y_pos + 1)], fill=1)
-        y_pos += 2
-        desc_background_height = 14
+        y_pos += TITLE_DESC_MARGIN_Y
+        desc_background_height = DESC_BACKGROUND_HEIGHT
         draw.rectangle((base_x, y_pos, base_x + WIDTH - 4, y_pos + desc_background_height), fill=0)
         desc = item["description"].replace("\n", " ").strip()
         scroll_offset = int(self.scroll_position)
@@ -726,9 +750,9 @@ class RSSReaderApp:
         draw.text(((WIDTH - text_width) // 2, HEIGHT // 2 - 6), feed_name, font=self.FONT, fill=0)
     # ヘッダ領域を描画する
     def _draw_header(self, draw: ImageDraw.ImageDraw) -> Tuple[str, int]:
-        header_height = 14
-        draw.rectangle((0, 0, WIDTH, header_height), fill=1)
-        current_feed = "Unknown Feed"
+        header_height = HEADER_HEIGHT
+        draw.rectangle((0, 0, WIDTH, header_height), fill=1)␊
+        current_feed = UNKNOWN_FEED_TITLE
         if 0 <= self.current_feed_index < len(self.rss_feeds):
             current_feed = self.rss_feeds[self.current_feed_index]["title"]
         draw.text((2, 1), current_feed, font=self.TITLE_FONT, fill=0)
@@ -736,19 +760,19 @@ class RSSReaderApp:
         time_width = self.get_text_width(current_time, self.TITLE_FONT)
         draw.text((WIDTH - time_width - 3, 1), current_time, font=self.TITLE_FONT, fill=0)
         draw.line([(0, header_height), (WIDTH, header_height)], fill=1)
-        content_y = header_height + 2
+        content_y = header_height + HEADER_CONTENT_PADDING_Y
         return current_feed, content_y
 
     # ローディング状態を描画する
     def _draw_loading(self, draw: ImageDraw.ImageDraw) -> None:
         self.loading_effect -= 1
-        message = "ニュースを読み込み中..."
+        message = LOADING_MESSAGE
         if self.loading_effect % 2 == 0:
             msg_width = self.get_text_width(message, self.FONT)
             draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
 
-        bar_count = 20
-        segment_width = 6
+        bar_count = LOADING_BAR_COUNT
+        segment_width = LOADING_SEGMENT_WIDTH
         for i in range(bar_count):
             segment_x = ((self.loading_effect + i) % (WIDTH // segment_width)) * segment_width
             draw.rectangle((segment_x, HEIGHT - 8, segment_x + segment_width - 2, HEIGHT - 2), fill=1)
@@ -764,7 +788,7 @@ class RSSReaderApp:
         prev_feed_idx: int,
         prev_item_idx: int,
     ) -> None:
-        self.transition_effect -= 1.5
+        self.transition_effect -= TRANSITION_FRAME_STEP
         progress = self.transition_effect / self.config.transition_frames
         offset = int(WIDTH * progress * self.transition_direction)
         if (
@@ -800,7 +824,7 @@ class RSSReaderApp:
 
     # 空表示を描画する
     def _draw_empty_state(self, draw: ImageDraw.ImageDraw) -> None:
-        message = "ニュースがありません"
+        message = NO_NEWS_MESSAGE
         msg_width = self.get_text_width(message, self.FONT)
         draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
 
@@ -1240,6 +1264,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
