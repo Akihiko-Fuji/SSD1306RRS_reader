@@ -7,7 +7,7 @@ SSD1309/SSD1306 OLED RSSリーダー (I2C/SPI両対応)
 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 作成者        : Akihiko Fuji
 更新日        : 2026/01/12
-バージョン    : 1.7.1
+バージョン    : 1.7.2
 ------------------------------------------------
 Raspberry Pi + luma.oled環境で動作する日本語対応RSSビューワー。
 複数RSSソースを巡回し、記事を自動スクロール表示します。
@@ -260,14 +260,20 @@ class RSSReaderApp:
         self._long_press_handled = False          # 長押し処理済みフラグ
         self._display_enabled = True              # True=表示点灯、False=消灯
         self._display_blank_drawn = False         # 消灯時にブランクを描画済みか
-        self._user_agent = "SSD1309-RSS/1.7.1 (+https://github.com/)"  # RSS取得のUser-Agent
+        self._user_agent = "SSD1309-RSS/1.7.2 (+https://github.com/)"  # RSS取得のUser-Agent
 
         # ロック（必要最小限）
         self._state_lock = threading.Lock()
         self._desc_width_cache: Dict[Tuple[int, str, int], int] = {}
 
     # 記事切替時の表示状態を初期化する
-    def _reset_article_state(self, transition_direction: int) -> None:
+    def _reset_article_state(
+        self,
+        transition_direction: int,
+        *,
+        keep_feed_idx: Optional[int] = None,
+        keep_item_idx: Optional[int] = None,
+    ) -> None:
         self.scroll_position = 0.0
         self.transition_effect = self.TRANSITION_FRAMES
         self.transition_direction = transition_direction
@@ -275,6 +281,12 @@ class RSSReaderApp:
         self.auto_scroll_paused = True
         self._scroll_ease_elapsed = 0.0
         self._last_scroll_time = time.monotonic()
+        if keep_feed_idx is not None and keep_item_idx is not None:
+            self._desc_width_cache = {
+                key: value
+                for key, value in self._desc_width_cache.items()
+                if key[0] == keep_feed_idx and key[2] == keep_item_idx
+            }
 
 # 1) 初期化処理
     # 初期化
@@ -701,7 +713,11 @@ class RSSReaderApp:
             self.transition_effect -= 1.5
             progress = self.transition_effect / self.TRANSITION_FRAMES
             offset = int(WIDTH * progress * self.transition_direction)
-            if news_items and feed_idx in news_items and news_items[feed_idx]:
+            if (
+                news_items
+                and feed_idx in news_items
+                and 0 <= item_idx < len(news_items[feed_idx])
+            ):
                 item = news_items[feed_idx][item_idx]
                 self.draw_article_content(draw, item, 2 + offset, content_y)
                 if (
@@ -742,7 +758,11 @@ class RSSReaderApp:
             self._prev_feed_index = prev_feed
             self._prev_item_index = prev_item
             self.feed_switch_time = time.monotonic()
-            self._reset_article_state(transition_direction=-1)
+            self._reset_article_state(
+                transition_direction=-1,
+                keep_feed_idx=self.current_feed_index,
+                keep_item_idx=self.current_item_index,
+            )
         self.log.info(f"Feed switched -> {self.rss_feeds[self.current_feed_index]['title']}")
 
     # 次の記事へ
@@ -759,7 +779,11 @@ class RSSReaderApp:
                 self.current_item_index = 0
             self._prev_feed_index = prev_feed
             self._prev_item_index = prev_item
-            self._reset_article_state(transition_direction=-1)
+            self._reset_article_state(
+                transition_direction=-1,
+                keep_feed_idx=self.current_feed_index,
+                keep_item_idx=self.current_item_index,
+            )
 
     # 前の記事へ（関数の呼び出しが掛かってないので、必要に応じてGPIOボタンなどに割り当てるなどをしてください）
     # 前の記事へ戻す
@@ -775,7 +799,11 @@ class RSSReaderApp:
                 self.current_item_index = len(self.news_items[self.current_feed_index]) - 1
             self._prev_feed_index = prev_feed
             self._prev_item_index = prev_item
-            self._reset_article_state(transition_direction=1)
+            self._reset_article_state(
+                transition_direction=1,
+                keep_feed_idx=self.current_feed_index,
+                keep_item_idx=self.current_item_index,
+            )
 
 
     # 説明文スクロール位置を更新する
@@ -1082,6 +1110,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
