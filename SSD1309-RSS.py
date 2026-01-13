@@ -44,19 +44,9 @@ from PIL import Image, ImageDraw, ImageFont
 # luma.oled
 from luma.oled.device import ssd1309  # ssd1306 を利用する場合は変更
 
-# 液晶解像度設定
-WIDTH = 128
-HEIGHT = 64
-
 # -----------------------------
 # 設定値（上部に集約）
 # -----------------------------
-
-# フォントファイル名（同一フォルダ内）
-TITLE_FONT_FILENAME = "JF-Dot-MPlusH10.ttf"
-MAIN_FONT_FILENAME  = "JF-Dot-MPlusH12.ttf"
-TITLE_FONT_SIZE     = 10
-MAIN_FONT_SIZE      = 12
 
 # 送りやフィードに利用するGPIOピン（BCM）
 BUTTON_FEED = 18
@@ -120,6 +110,12 @@ class AnimationSettings:
 # 描画固定値は LayoutSettings（定数群として集約）
 @dataclass(frozen=True)
 class LayoutSettings:
+    display_width: int             = 128
+    display_height: int            = 64
+    title_font_filename: str       = "JF-Dot-MPlusH10.ttf"
+    main_font_filename: str        = "JF-Dot-MPlusH12.ttf"
+    title_font_size: int           = 10
+    main_font_size: int            = 12
     title_wrap_width: int          = 20
     title_line_height: int         = 12
     header_height: int             = 14
@@ -382,11 +378,12 @@ class RSSReaderApp:
     # 表示用フォントを読み込む
     def _init_fonts(self) -> None:
         try:
+            layout = self.layout_settings
             font_dir = os.path.dirname(os.path.abspath(__file__))
-            title_font_file = os.path.join(font_dir, TITLE_FONT_FILENAME)
-            main_font_file = os.path.join(font_dir, MAIN_FONT_FILENAME)
-            self.TITLE_FONT = ImageFont.truetype(title_font_file, TITLE_FONT_SIZE)
-            self.FONT = ImageFont.truetype(main_font_file, MAIN_FONT_SIZE)
+            title_font_file = os.path.join(font_dir, layout.title_font_filename)
+            main_font_file = os.path.join(font_dir, layout.main_font_filename)
+            self.TITLE_FONT = ImageFont.truetype(title_font_file, layout.title_font_size)
+            self.FONT = ImageFont.truetype(main_font_file, layout.main_font_size)
             self.log.info("Fonts loaded")
         except OSError as e:
             self.log.error(f"Font loading error: {e} -> using default fonts")
@@ -416,6 +413,7 @@ class RSSReaderApp:
     # OLEDディスプレイを初期化する
     def _init_display(self) -> None:
         try:
+            layout = self.layout_settings
             # SPIモード
             if USE_SPI:
                 from luma.core.interface.serial import spi
@@ -426,7 +424,11 @@ class RSSReaderApp:
                     gpio_DC=SPI_GPIO_DC,
                     gpio_RST=SPI_GPIO_RST,
                 )
-                self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT) # ssd1306 を利用する場合は変更
+                self.display = ssd1309(
+                    serial_interface=serial,
+                    width=layout.display_width,
+                    height=layout.display_height,
+                ) # ssd1306 を利用する場合は変更
                 self.log.info("OLED initialized (SPI mode)")
 
             # I2Cモード
@@ -437,7 +439,11 @@ class RSSReaderApp:
                     port=I2C_PORT,
                     address=I2C_ADDRESS,
                 ) # アドレスが異なる場合は sudo i2cdetect -y 1 で確認し変更してください
-                self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT) # ssd1306 を利用する場合は変更
+                self.display = ssd1309(
+                    serial_interface=serial,
+                    width=layout.display_width,
+                    height=layout.display_height,
+                ) # ssd1306 を利用する場合は変更
                 self.log.info("OLED initialized (I2C mode)")
 
             self.display.contrast(OLED_CONTRAST)
@@ -711,9 +717,11 @@ class RSSReaderApp:
         base_y: int,
         highlight_title: bool = False,
     ) -> int:
+        layout = self.layout_settings
+        width = layout.display_width
         title_wrapped = item.get("title_lines") or textwrap.wrap(
             item["title"],
-            width=self.layout_settings.title_wrap_width,
+            width=layout.title_wrap_width,
         )
         y_pos = base_y
         for i, line in enumerate(title_wrapped[:2]):
@@ -731,55 +739,74 @@ class RSSReaderApp:
                 draw.text((base_x, y_pos), line, font=self.FONT, fill=0)
             else:
                 draw.text((base_x, y_pos), line, font=self.FONT, fill=1)
-            y_pos += self.layout_settings.title_line_height
-        title_block_height = self.layout_settings.title_line_height * (
+            y_pos += layout.title_line_height
+        title_block_height = layout.title_line_height * (
             2 if len(title_wrapped) >= 2 else 1
         )
         y_pos = base_y + title_block_height
-        draw.line([(base_x, y_pos + 1), (base_x + WIDTH - 4, y_pos + 1)], fill=1)
-        y_pos += self.layout_settings.title_desc_margin_y
-        desc_background_height = self.layout_settings.desc_background_height
-        draw.rectangle((base_x, y_pos, base_x + WIDTH - 4, y_pos + desc_background_height), fill=0)
+        draw.line([(base_x, y_pos + 1), (base_x + width - 4, y_pos + 1)], fill=1)
+        y_pos += layout.title_desc_margin_y
+        desc_background_height = layout.desc_background_height
+        draw.rectangle(
+            (base_x, y_pos, base_x + width - 4, y_pos + desc_background_height),
+            fill=0,
+        )
         desc = item["description"].replace("\n", " ").strip()
         scroll_offset = int(self.scroll_position)
         desc_x = base_x if self.auto_scroll_paused else (base_x - scroll_offset)
         draw.text((desc_x, y_pos), desc, font=self.FONT, fill=1)
         return y_pos + desc_background_height
-
+                     
     # フィード切替時の通知（中央反転表示）
     # フィード切替通知を描画する
     def draw_feed_notification(self, draw: ImageDraw.ImageDraw, feed_name: str) -> None:
-        draw.rectangle((10, HEIGHT // 2 - 12, WIDTH - 10, HEIGHT // 2 + 12), fill=1)
+        layout = self.layout_settings
+        width = layout.display_width
+        height = layout.display_height
+        draw.rectangle(
+            (10, height // 2 - 12, width - 10, height // 2 + 12),
+            fill=1,
+        )
         text_width = self.get_text_width(feed_name, self.FONT)
-        draw.text(((WIDTH - text_width) // 2, HEIGHT // 2 - 6), feed_name, font=self.FONT, fill=0)
+        draw.text(
+            ((width - text_width) // 2, height // 2 - 6),
+            feed_name,
+            font=self.FONT,
+            fill=0,
+        )
     # ヘッダ領域を描画する
     def _draw_header(self, draw: ImageDraw.ImageDraw, feed_idx: int) -> Tuple[str, int]:
-        header_height = self.layout_settings.header_height
-        draw.rectangle((0, 0, WIDTH, header_height), fill=1)
+        layout = self.layout_settings
+        width = layout.display_width
+        header_height = layout.header_height
+        draw.rectangle((0, 0, width, header_height), fill=1)
         current_feed = UNKNOWN_FEED_TITLE
         if 0 <= feed_idx < len(self.rss_feeds):
             current_feed = self.rss_feeds[feed_idx]["title"]
         draw.text((2, 1), current_feed, font=self.TITLE_FONT, fill=0)
         current_time = time.strftime("%H:%M")
         time_width = self.get_text_width(current_time, self.TITLE_FONT)
-        draw.text((WIDTH - time_width - 3, 1), current_time, font=self.TITLE_FONT, fill=0)
-        draw.line([(0, header_height), (WIDTH, header_height)], fill=1)
-        content_y = header_height + self.layout_settings.header_content_padding_y
+        draw.text((width - time_width - 3, 1), current_time, font=self.TITLE_FONT, fill=0)
+        draw.line([(0, header_height), (width, header_height)], fill=1)
+        content_y = header_height + layout.header_content_padding_y
         return current_feed, content_y
 
     # ローディング状態を描画する
     def _draw_loading(self, draw: ImageDraw.ImageDraw) -> None:
+        layout = self.layout_settings
+        width = layout.display_width
+        height = layout.display_height
         self.loading_effect -= 1
         message = LOADING_MESSAGE
         if self.loading_effect % 2 == 0:
             msg_width = self.get_text_width(message, self.FONT)
-            draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
+            draw.text(((width - msg_width) // 2, height // 2 - 6), message, font=self.FONT, fill=1)
 
-        bar_count = self.layout_settings.loading_bar_count
-        segment_width = self.layout_settings.loading_segment_width
+        bar_count = layout.loading_bar_count
+        segment_width = layout.loading_segment_width
         for i in range(bar_count):
-            segment_x = ((self.loading_effect + i) % (WIDTH // segment_width)) * segment_width
-            draw.rectangle((segment_x, HEIGHT - 8, segment_x + segment_width - 2, HEIGHT - 2), fill=1)
+            segment_x = ((self.loading_effect + i) % (width // segment_width)) * segment_width
+            draw.rectangle((segment_x, height - 8, segment_x + segment_width - 2, height - 2), fill=1)
 
     # トランジション描画を行う
     def _draw_transition(
@@ -792,9 +819,10 @@ class RSSReaderApp:
         prev_feed_idx: int,
         prev_item_idx: int,
     ) -> None:
+        width = self.layout_settings.display_width
         self.transition_effect -= self.layout_settings.transition_frame_step
         progress = self.transition_effect / self.config.transition_frames
-        offset = int(WIDTH * progress * self.transition_direction)
+        offset = int(width * progress * self.transition_direction)
         if (
             news_items
             and feed_idx in news_items
@@ -808,7 +836,7 @@ class RSSReaderApp:
                 and 0 <= prev_item_idx < len(news_items[prev_feed_idx])
             ):
                 prev_item = news_items[prev_feed_idx][prev_item_idx]
-                next_x = 2 + WIDTH * (-self.transition_direction) + offset
+                next_x = 2 + width * (-self.transition_direction) + offset
                 self.draw_article_content(draw, prev_item, next_x, content_y)
 
     # 記事描画を行う
@@ -830,12 +858,15 @@ class RSSReaderApp:
     def _draw_empty_state(self, draw: ImageDraw.ImageDraw) -> None:
         message = NO_NEWS_MESSAGE
         msg_width = self.get_text_width(message, self.FONT)
-        draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
+        width = self.layout_settings.display_width
+        height = self.layout_settings.display_height
+        draw.text(((width - msg_width) // 2, height // 2 - 6), message, font=self.FONT, fill=1)
 
     # 現在のRSS記事内容を描画してImageを返す
     # 現在の表示内容を描画して画像を返す
     def draw_rss_screen(self) -> Image.Image:
-        image = Image.new("1", (WIDTH, HEIGHT))
+        layout = self.layout_settings
+        image = Image.new("1", (layout.display_width, layout.display_height))
         draw = ImageDraw.Draw(image)
 
         with self._state_lock:
@@ -996,7 +1027,7 @@ class RSSReaderApp:
                 self._desc_width_cache[cache_key] = desc_width
 
             # 短文（スクロール不要）は article_display_time 経過で次記事へ
-            short_text = desc_width <= (WIDTH - 4)
+            short_text = desc_width <= (self.layout_settings.display_width - 4)
             ready_to_advance = elapsed_time >= self.config.article_display_time if short_text else False
 
         if short_text:
@@ -1029,7 +1060,9 @@ class RSSReaderApp:
         with self._state_lock:
             self.scroll_position += increment
             tail_margin_px = self.animation_settings.tail_margin_px
-            reached_tail = self.scroll_position > (desc_width + WIDTH + tail_margin_px)
+            reached_tail = self.scroll_position > (
+                desc_width + self.layout_settings.display_width + tail_margin_px
+            )
 
         if reached_tail:
             self.move_to_next_article()
@@ -1126,7 +1159,8 @@ class RSSReaderApp:
         except Exception:
             pass
         if self.display:
-            blank = Image.new("1", (WIDTH, HEIGHT), 0)
+            layout = self.layout_settings
+            blank = Image.new("1", (layout.display_width, layout.display_height), 0)
             try:
                 self.display.display(blank)
             except Exception:
@@ -1143,7 +1177,8 @@ class RSSReaderApp:
     def _draw_blank_display(self) -> None:
         if not self.display or self._display_blank_drawn:
             return
-        blank = Image.new("1", (WIDTH, HEIGHT), 0)
+        layout = self.layout_settings
+        blank = Image.new("1", (layout.display_width, layout.display_height), 0)
         try:
             self.display.display(blank)
             self._display_blank_drawn = True
@@ -1265,23 +1300,5 @@ async def main() -> None:
         app._cleanup()
 
 
-
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
