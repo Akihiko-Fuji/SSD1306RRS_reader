@@ -7,7 +7,7 @@ SSD1309/SSD1306 OLED RSSリーダー (I2C/SPI両対応)
 概要          : SSD1309/SSD1306 OLED用 複数RSS対応リーダー
 作成者        : Akihiko Fuji
 更新日        : 2026/01/12
-バージョン    : 1.7
+バージョン    : 1.7.1
 ------------------------------------------------
 Raspberry Pi + luma.oled環境で動作する日本語対応RSSビューワー。
 複数RSSソースを巡回し、記事を自動スクロール表示します。
@@ -456,7 +456,7 @@ class RSSReaderApp:
             )
             for entry in entries
         ]
-         self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
+        self.log.info(f" -> {feed_info['title']}: {len(feed_items)} items")
         return idx, feed_items, None
 
     # テキスト形式のフィードを取得して整形する
@@ -491,7 +491,7 @@ class RSSReaderApp:
             raise FileNotFoundError(f"Text source not found: {source}")
         return path.read_text(encoding="utf-8")
 
-     def _build_feed_item(
+    def _build_feed_item(
         self,
         feed_info: Dict[str, Any],
         idx: int,
@@ -977,4 +977,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
