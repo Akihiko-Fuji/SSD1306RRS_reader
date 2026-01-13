@@ -48,6 +48,49 @@ from luma.oled.device import ssd1309  # ssd1306 を利用する場合は変更
 WIDTH = 128
 HEIGHT = 64
 
+# -----------------------------
+# 設定値（上部に集約）
+# -----------------------------
+
+# フォントファイル名（同一フォルダ内）
+TITLE_FONT_FILENAME = "JF-Dot-MPlusH10.ttf"
+MAIN_FONT_FILENAME = "JF-Dot-MPlusH12.ttf"
+
+# 送りやフィードに利用するGPIOピン（BCM）
+BUTTON_FEED = 18
+
+RSS_FEED_FILE = "rss-read.me"
+
+# RSS取得時のUser-Agent
+USER_AGENT = "SSD1309-RSS/1.8 (+https://github.com/)"
+
+# SPI接続時はTrue / I2C接続時はFalse
+USE_SPI = False
+
+# SPI/I2C パラメータ
+SPI_PORT = 0
+SPI_DEVICE = 0
+SPI_GPIO_DC = 24
+SPI_GPIO_RST = 25
+I2C_PORT = 1
+I2C_ADDRESS = 0x3C
+
+# OLED表示設定
+OLED_CONTRAST = 0xFF
+
+# 画面表示時間の設定 8:30 - 18:00 のみ利用するとしている
+DISPLAY_TIME_START = (8, 30)
+DISPLAY_TIME_END =  (18, 0)
+
+# RSSフィード（rss-read.meが未配置/空のときに使われるデフォルト）
+DEFAULT_RSS_FEEDS = [
+    {"title": "NHKニュース"     , "url": "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",       "color": 1, "type": "rss"},
+    {"title": "NHKニュース 科学", "url": "https://news.web.nhk/n-data/conf/na/rss/cat3.xml",       "color": 1, "type": "rss"},
+    {"title": "NHKニュース 政治", "url": "https://news.web.nhk/n-data/conf/na/rss/cat4.xml",       "color": 1, "type": "rss"},
+    {"title": "NHKニュース 経済", "url": "https://news.web.nhk/n-data/conf/na/rss/cat5.xml",       "color": 1, "type": "rss"},
+    {"title": "NHKニュース 国際", "url": "https://news.web.nhk/n-data/conf/na/rss/cat6.xml",       "color": 1, "type": "rss"},
+]
+
 @dataclass(frozen=True)
 class NetworkSettings:
     max_retries: int = 3
@@ -103,21 +146,6 @@ def setup_logging() -> logging.Logger:
         handler.setFormatter(fmt)
         logger.addHandler(handler)
     return logger
-
-
-# 送りやフィードに利用するGPIOピン（BCM）
-BUTTON_FEED = 18
-
-RSS_FEED_FILE = "rss-read.me"
-
-# RSSフィード（rss-read.meが未配置/空のときに使われるデフォルト）
-DEFAULT_RSS_FEEDS = [
-    {"title": "NHKニュース"     , "url": "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",       "color": 1, "type": "rss"},
-    {"title": "NHKニュース 科学", "url": "https://news.web.nhk/n-data/conf/na/rss/cat3.xml",       "color": 1, "type": "rss"},
-    {"title": "NHKニュース 政治", "url": "https://news.web.nhk/n-data/conf/na/rss/cat4.xml",       "color": 1, "type": "rss"},
-    {"title": "NHKニュース 経済", "url": "https://news.web.nhk/n-data/conf/na/rss/cat5.xml",       "color": 1, "type": "rss"},
-    {"title": "NHKニュース 国際", "url": "https://news.web.nhk/n-data/conf/na/rss/cat6.xml",       "color": 1, "type": "rss"},
-]
 
 
 # rss-read.meの色設定を解析する
@@ -200,13 +228,6 @@ def _load_rss_feeds(feed_path: str, log: logging.Logger) -> Tuple[List[Dict[str,
 
     return feeds, f"rss-read.me ({len(feeds)} feeds)"
 
-
-# 画面表示時間の設定 8:30 - 18:00 のみ利用するとしている
-DISPLAY_TIME_START = (8, 30)
-DISPLAY_TIME_END =  (18, 0)
-
-# SPI接続時はTrue / I2C接続時はFalse
-USE_SPI = False
 
 class RSSReaderApp:
     """RSSリーダーのメインアプリケーション。
@@ -340,8 +361,8 @@ class RSSReaderApp:
     def _init_fonts(self) -> None:
         try:
             font_dir = os.path.dirname(os.path.abspath(__file__))
-            title_font_file = os.path.join(font_dir, "JF-Dot-MPlusH10.ttf")
-            main_font_file = os.path.join(font_dir, "JF-Dot-MPlusH12.ttf")
+            title_font_file = os.path.join(font_dir, TITLE_FONT_FILENAME)
+            main_font_file = os.path.join(font_dir, MAIN_FONT_FILENAME)
             self.TITLE_FONT = ImageFont.truetype(title_font_file, 10)
             self.FONT = ImageFont.truetype(main_font_file, 12)
             self.log.info("Fonts loaded")
@@ -377,7 +398,12 @@ class RSSReaderApp:
             if USE_SPI:
                 from luma.core.interface.serial import spi
 
-                serial = spi(device=0, port=0, gpio_DC=24, gpio_RST=25)
+                serial = spi(
+                    device=SPI_DEVICE,
+                    port=SPI_PORT,
+                    gpio_DC=SPI_GPIO_DC,
+                    gpio_RST=SPI_GPIO_RST,
+                )
                 self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT) # ssd1306 を利用する場合は変更
                 self.log.info("OLED initialized (SPI mode)")
 
@@ -385,11 +411,14 @@ class RSSReaderApp:
             else:
                 from luma.core.interface.serial import i2c
 
-                serial = i2c(port=1, address=0x3C) # アドレスが異なる場合は sudo i2cdetect -y 1 で確認し変更してください
+                serial = i2c(
+                    port=I2C_PORT,
+                    address=I2C_ADDRESS,
+                ) # アドレスが異なる場合は sudo i2cdetect -y 1 で確認し変更してください
                 self.display = ssd1309(serial_interface=serial, width=WIDTH, height=HEIGHT) # ssd1306 を利用する場合は変更
                 self.log.info("OLED initialized (I2C mode)")
 
-            self.display.contrast(0xFF)
+            self.display.contrast(OLED_CONTRAST)
             self.display.clear()
         except Exception as e:
             self.log.error(f"OLED initialization failed: {e}")
@@ -1211,6 +1240,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
