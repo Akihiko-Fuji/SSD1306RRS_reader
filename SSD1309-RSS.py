@@ -326,7 +326,6 @@ class RSSReaderApp:
         self._long_press_handled  = False         # 長押し処理済みフラグ
         self._display_enabled     = True          # True=表示点灯、False=消灯
         self._display_blank_drawn = False         # 消灯時にブランクを描画済みか
-        self._user_agent = "SSD1309-RSS/1.8 (+https://github.com/)"  # RSS取得のUser-Agent
 
         # ロック（必要最小限）
         self._state_lock = threading.Lock()
@@ -504,7 +503,7 @@ class RSSReaderApp:
         timeout = aiohttp.ClientTimeout(total=self.network_settings.timeout)
         async with aiohttp.ClientSession(
             timeout=timeout,
-            headers={"User-Agent": self._user_agent},
+            headers={"User-Agent": USER_AGENT},
         ) as session:
             # 全フィードの取得タスクを並列実行
             tasks = [
@@ -1264,6 +1263,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
