@@ -750,7 +750,7 @@ class RSSReaderApp:
     # ヘッダ領域を描画する
     def _draw_header(self, draw: ImageDraw.ImageDraw) -> Tuple[str, int]:
         header_height = HEADER_HEIGHT
-        draw.rectangle((0, 0, WIDTH, header_height), fill=1)␊
+        draw.rectangle((0, 0, WIDTH, header_height), fill=1)
         current_feed = UNKNOWN_FEED_TITLE
         if 0 <= self.current_feed_index < len(self.rss_feeds):
             current_feed = self.rss_feeds[self.current_feed_index]["title"]
@@ -1263,6 +1263,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
