@@ -264,7 +264,7 @@ class RSSReaderApp:
 
         # ロック（必要最小限）
         self._state_lock = threading.Lock()
-        self._desc_width_cache: Dict[Tuple[int, int], int] = {}
+        self._desc_width_cache: Dict[Tuple[int, str, int], int] = {}
 
     # 記事切替時の表示状態を初期化する
     def _reset_article_state(self, transition_direction: int) -> None:
@@ -562,7 +562,6 @@ class RSSReaderApp:
         }
         with self._state_lock:
             self.news_items = snapshot
-            self.last_rss_update = time.monotonic()
             self._desc_width_cache.clear()
 
         self.failover_snapshot = {
@@ -672,7 +671,9 @@ class RSSReaderApp:
 
         # ヘッダ部分の描画
         draw.rectangle((0, 0, WIDTH, header_height), fill=1)
-        current_feed = self.rss_feeds[feed_idx]["title"]
+        current_feed = "Unknown Feed"
+        if 0 <= feed_idx < len(self.rss_feeds):
+            current_feed = self.rss_feeds[feed_idx]["title"]
         draw.text((2, 1), current_feed, font=self.TITLE_FONT, fill=0)
         current_time = time.strftime("%H:%M")
         time_width = self.get_text_width(current_time, self.TITLE_FONT)
@@ -725,7 +726,7 @@ class RSSReaderApp:
 
         # フィード切替通知
         if time.monotonic() - self.feed_switch_time < 2.0:
-            self.draw_feed_notification(draw, self.rss_feeds[feed_idx]["title"])
+            self.draw_feed_notification(draw, current_feed)
 
         return image
 
@@ -808,7 +809,7 @@ class RSSReaderApp:
 
             # 説明文の幅を計測
             desc = item["description"].replace("\n", " ").strip()
-            cache_key = (feed_idx, item_idx)
+            cache_key = (feed_idx, item.get("link", ""), item_idx)
             desc_width = self._desc_width_cache.get(cache_key)
             if desc_width is None:
                 desc_width = self.get_text_width(desc, self.FONT) if desc else 0
@@ -1081,6 +1082,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
