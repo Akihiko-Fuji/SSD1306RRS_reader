@@ -35,7 +35,7 @@ from pathlib import Path
 
 from dataclasses import dataclass
 from collections import deque
-from typing import Dict, List, Any, Optional, Deque, Tuple
+from typing import Dict, List, Any, Optional, Deque, Tuple, TypedDict
 
 import aiohttp
 import feedparser
@@ -67,6 +67,17 @@ class AnimationSettings:
 @dataclass(frozen=True)
 class DisplaySettings:
     sleep_interval: int = 30
+
+class FeedItem(TypedDict):
+    title: str
+    description: str
+    published: str
+    link: str
+    feed_title: str
+    feed_color: int
+    feed_index: int
+    title_lines: List[str]
+    desc_width: Optional[int]
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -230,7 +241,7 @@ class RSSReaderApp:
 
         # 状態（可変）
         # 時間計測は time.monotonic を使用し、表示用時刻は time.localtime/strftime を使う。
-        self.news_items: Dict[int, List[Dict[str, Any]]] = {}  # 取得済みRSSをフィードindexごとに保持
+        self.news_items: Dict[int, List[FeedItem]] = {}  # 取得済みRSSをフィードindexごとに保持
         self.current_feed_index: int = 0          # 現在表示中のフィードindex
         self.current_item_index: int = 0          # 現在表示中の記事index（当該フィード内）
         self.scroll_position: float = 0.0         # 説明文のスクロール位置（px）
@@ -243,11 +254,11 @@ class RSSReaderApp:
         self._prev_feed_index: int = 0            # 直前に表示していたフィード
         self._prev_item_index: int = 0            # 直前に表示していた記事
 
-        self.feed_cache: Dict[int, Deque[Dict[str, Any]]] = {
+        self.feed_cache: Dict[int, Deque[FeedItem]] = {
             idx: deque(maxlen=self.cache_settings.max_items)
             for idx in range(len(self.rss_feeds))
         }
-        self.failover_snapshot: Dict[int, List[Dict[str, Any]]] = {}
+        self.failover_snapshot: Dict[int, List[FeedItem]] = {}
 
         # スケジューラ／タイマー代替：メインループ内の時刻管理
         self._last_main_update: float = 0.0       # 直近の描画更新実行時刻（main_update_interval判定用）
@@ -427,7 +438,7 @@ class RSSReaderApp:
                 f"No feed items retrieved (attempt {attempt}/{total_attempts})"
             )
 
-            if attempt <= settings.max_retries:
+            if attempt < total_attempts:
                 delay = settings.base_delay * (2 ** (attempt - 1))
                 self.log.debug(f"Retrying RSS fetch after {delay:.1f}s delay")
                 await asyncio.sleep(delay)
@@ -437,7 +448,7 @@ class RSSReaderApp:
         return False
 
     # 全フィードを並列で取得する
-    async def _fetch_rss_feed_async(self) -> Tuple[Dict[int, List[Dict[str, Any]]], Dict[int, Exception]]:
+    async def _fetch_rss_feed_async(self) -> Tuple[Dict[int, List[FeedItem]], Dict[int, Exception]]:
         timeout = aiohttp.ClientTimeout(total=self.network_settings.timeout)
         async with aiohttp.ClientSession(
             timeout=timeout,
@@ -450,7 +461,7 @@ class RSSReaderApp:
             ]
             results = await asyncio.gather(*tasks)
 
-        successes: Dict[int, List[Dict[str, Any]]] = {}
+        successes: Dict[int, List[FeedItem]] = {}
         errors: Dict[int, Exception] = {}
         for idx, items, error in results:
             if error:
@@ -465,7 +476,7 @@ class RSSReaderApp:
         session: aiohttp.ClientSession,
         idx: int,
         feed_info: Dict[str, Any],
-    ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
+    ) -> Tuple[int, Optional[List[FeedItem]], Optional[Exception]]:
         try:
             if feed_info.get("type") == "text":
                 return await self._fetch_text_feed(session, idx, feed_info)
@@ -482,7 +493,7 @@ class RSSReaderApp:
         session: aiohttp.ClientSession,
         idx: int,
         feed_info: Dict[str, Any],
-    ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
+    ) -> Tuple[int, Optional[List[FeedItem]], Optional[Exception]]:
         async with session.get(feed_info["url"]) as response:
             response.raise_for_status()
             payload = await response.read()
@@ -513,7 +524,7 @@ class RSSReaderApp:
         session: aiohttp.ClientSession,
         idx: int,
         feed_info: Dict[str, Any],
-    ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
+    ) -> Tuple[int, Optional[List[FeedItem]], Optional[Exception]]:
         source = feed_info["url"]
         if source.startswith(("http://", "https://")):
             async with session.get(source) as response:
@@ -548,7 +559,7 @@ class RSSReaderApp:
         description: str,
         published: str = "",
         link: str = "",
-    ) -> Dict[str, Any]:
+    ) -> FeedItem:
         title_lines = textwrap.wrap(title, width=20)
         return {
             "title": title,
@@ -568,7 +579,7 @@ class RSSReaderApp:
 
  
     # 取得結果をキャッシュへ反映する
-    def _update_cache(self, new_data: Dict[int, List[Dict[str, Any]]]) -> None:
+    def _update_cache(self, new_data: Dict[int, List[FeedItem]]) -> None:
         for idx, items in new_data.items():
             cache = self.feed_cache.setdefault(
                 idx, deque(maxlen=self.cache_settings.max_items)
@@ -583,11 +594,11 @@ class RSSReaderApp:
             self.log.info(f"Total items: {total_items}")
 
     # キャッシュ内容を表示用データへ適用する
-    def _apply_cache_to_news(self) -> Optional[Dict[int, List[Dict[str, Any]]]]:
+    def _apply_cache_to_news(self) -> Optional[Dict[int, List[FeedItem]]]:
         if not self.feed_cache:
             return None
 
-        snapshot: Dict[int, List[Dict[str, Any]]] = {
+        snapshot: Dict[int, List[FeedItem]] = {
             idx: list(cache) for idx, cache in self.feed_cache.items()
         }
         with self._state_lock:
@@ -644,7 +655,7 @@ class RSSReaderApp:
     def draw_article_content(
         self,
         draw: ImageDraw.ImageDraw,
-        item: Dict[str, Any],
+        item: FeedItem,
         base_x: int,
         base_y: int,
         highlight_title: bool = False,
@@ -684,13 +695,91 @@ class RSSReaderApp:
         draw.rectangle((10, HEIGHT // 2 - 12, WIDTH - 10, HEIGHT // 2 + 12), fill=1)
         text_width = self.get_text_width(feed_name, self.FONT)
         draw.text(((WIDTH - text_width) // 2, HEIGHT // 2 - 6), feed_name, font=self.FONT, fill=0)
+    # ヘッダ領域を描画する
+    def _draw_header(self, draw: ImageDraw.ImageDraw) -> Tuple[str, int]:
+        header_height = 14
+        draw.rectangle((0, 0, WIDTH, header_height), fill=1)
+        current_feed = "Unknown Feed"
+        if 0 <= self.current_feed_index < len(self.rss_feeds):
+            current_feed = self.rss_feeds[self.current_feed_index]["title"]
+        draw.text((2, 1), current_feed, font=self.TITLE_FONT, fill=0)
+        current_time = time.strftime("%H:%M")
+        time_width = self.get_text_width(current_time, self.TITLE_FONT)
+        draw.text((WIDTH - time_width - 3, 1), current_time, font=self.TITLE_FONT, fill=0)
+        draw.line([(0, header_height), (WIDTH, header_height)], fill=1)
+        content_y = header_height + 2
+        return current_feed, content_y
+
+    # ローディング状態を描画する
+    def _draw_loading(self, draw: ImageDraw.ImageDraw) -> None:
+        self.loading_effect -= 1
+        message = "ニュースを読み込み中..."
+        if self.loading_effect % 2 == 0:
+            msg_width = self.get_text_width(message, self.FONT)
+            draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
+
+        bar_count = 20
+        segment_width = 6
+        for i in range(bar_count):
+            segment_x = ((self.loading_effect + i) % (WIDTH // segment_width)) * segment_width
+            draw.rectangle((segment_x, HEIGHT - 8, segment_x + segment_width - 2, HEIGHT - 2), fill=1)
+
+    # トランジション描画を行う
+    def _draw_transition(
+        self,
+        draw: ImageDraw.ImageDraw,
+        news_items: Dict[int, List[FeedItem]],
+        content_y: int,
+        feed_idx: int,
+        item_idx: int,
+        prev_feed_idx: int,
+        prev_item_idx: int,
+    ) -> None:
+        self.transition_effect -= 1.5
+        progress = self.transition_effect / self.config.transition_frames
+        offset = int(WIDTH * progress * self.transition_direction)
+        if (
+            news_items
+            and feed_idx in news_items
+            and 0 <= item_idx < len(news_items[feed_idx])
+        ):
+            item = news_items[feed_idx][item_idx]
+            self.draw_article_content(draw, item, 2 + offset, content_y)
+            if (
+                prev_feed_idx in news_items
+                and news_items[prev_feed_idx]
+                and 0 <= prev_item_idx < len(news_items[prev_feed_idx])
+            ):
+                prev_item = news_items[prev_feed_idx][prev_item_idx]
+                next_x = 2 + WIDTH * (-self.transition_direction) + offset
+                self.draw_article_content(draw, prev_item, next_x, content_y)
+
+    # 記事描画を行う
+    def _draw_article(
+        self,
+        draw: ImageDraw.ImageDraw,
+        news_items: Dict[int, List[FeedItem]],
+        content_y: int,
+        feed_idx: int,
+        item_idx: int,
+    ) -> bool:
+        if news_items and feed_idx in news_items and 0 <= item_idx < len(news_items[feed_idx]):
+            item = news_items[feed_idx][item_idx]
+            self.draw_article_content(draw, item, 2, content_y)
+            return True
+        return False
+
+    # 空表示を描画する
+    def _draw_empty_state(self, draw: ImageDraw.ImageDraw) -> None:
+        message = "ニュースがありません"
+        msg_width = self.get_text_width(message, self.FONT)
+        draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
 
     # 現在のRSS記事内容を描画してImageを返す
     # 現在の表示内容を描画して画像を返す
     def draw_rss_screen(self) -> Image.Image:
         image = Image.new("1", (WIDTH, HEIGHT))
         draw = ImageDraw.Draw(image)
-        header_height = 14
 
         with self._state_lock:
             news_items = self.news_items
@@ -700,65 +789,33 @@ class RSSReaderApp:
             prev_item_idx = self._prev_item_index
 
         # ヘッダ部分の描画
-        draw.rectangle((0, 0, WIDTH, header_height), fill=1)
-        current_feed = "Unknown Feed"
-        if 0 <= feed_idx < len(self.rss_feeds):
-            current_feed = self.rss_feeds[feed_idx]["title"]
-        draw.text((2, 1), current_feed, font=self.TITLE_FONT, fill=0)
-        current_time = time.strftime("%H:%M")
-        time_width = self.get_text_width(current_time, self.TITLE_FONT)
-        draw.text((WIDTH - time_width - 3, 1), current_time, font=self.TITLE_FONT, fill=0)
-        draw.line([(0, header_height), (WIDTH, header_height)], fill=1)
-        content_y = header_height + 2
+        current_feed, content_y = self._draw_header(draw)
 
         # 以下、ローディング／トランジション／通常描画
         if self.loading_effect > 0:
-            # ローディングバー・点滅テキスト
-            self.loading_effect -= 1
-            message = "ニュースを読み込み中..."
-            if self.loading_effect % 2 == 0:
-                msg_width = self.get_text_width(message, self.FONT)
-                draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
-
-            bar_count = 20
-            segment_width = 6
-            for i in range(bar_count):
-                segment_x = ((self.loading_effect + i) % (WIDTH // segment_width)) * segment_width
-                draw.rectangle((segment_x, HEIGHT - 8, segment_x + segment_width - 2, HEIGHT - 2), fill=1)
+            self._draw_loading(draw)
 
         # トランジション中：記事を横スクロールで切替
         elif self.transition_effect > 0:
-            self.transition_effect -= 1.5
-            progress = self.transition_effect / self.config.transition_frames
-            offset = int(WIDTH * progress * self.transition_direction)
-            if (
-                news_items
-                and feed_idx in news_items
-                and 0 <= item_idx < len(news_items[feed_idx])
-            ):
-                item = news_items[feed_idx][item_idx]
-                self.draw_article_content(draw, item, 2 + offset, content_y)
-                if (
-                    prev_feed_idx in news_items
-                    and news_items[prev_feed_idx]
-                    and 0 <= prev_item_idx < len(news_items[prev_feed_idx])
-                ):
-                    prev_item = news_items[prev_feed_idx][prev_item_idx]
-                    next_x = 2 + WIDTH * (-self.transition_direction) + offset
-                    self.draw_article_content(draw, prev_item, next_x, content_y)
+            self._draw_transition(
+                draw,
+                news_items,
+                content_y,
+                feed_idx,
+                item_idx,
+                prev_feed_idx,
+                prev_item_idx,
+            )
 
         # 通常記事表示
-        elif news_items and feed_idx in news_items and 0 <= item_idx < len(news_items[feed_idx]):
-            item = news_items[feed_idx][item_idx]
-            self.draw_article_content(draw, item, 2, content_y)
+        elif self._draw_article(draw, news_items, content_y, feed_idx, item_idx):
+            pass
 
         # ニュースが存在しない場合のメッセージ
         else:
-            message = "ニュースがありません"
-            msg_width = self.get_text_width(message, self.FONT)
-            draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
+            self._draw_empty_state(draw)
 
-        # フィード切替通知
+     # フィード切替通知
         if time.monotonic() - self.feed_switch_time < 2.0:
             self.draw_feed_notification(draw, current_feed)
 
@@ -1154,6 +1211,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
