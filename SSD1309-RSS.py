@@ -215,19 +215,22 @@ class RSSReaderApp:
         self.GPIO_POLL_INTERVAL = 0.02            # 秒｜GPIOポーリング周期（クリック検出のサンプリング間隔）
         self.MAIN_UPDATE_INTERVAL = 0.1           # 秒｜描画更新周期（CPU負荷と滑らかさのトレードオフ）
         self.DOUBLE_CLICK_INTERVAL = 0.6          # 秒｜ダブルクリック判定の間隔（この時間内の2押しでダブル扱い）
+        self._debounce_sec = 0.05                 # 秒｜ボタンのチャタリング除去時間
+        self.LONG_PRESS_INTERVAL = 1.5           # 秒｜長押し判定時間（消灯/点灯の切替）
 
         # 状態（可変）
         self.news_items: Dict[int, List[Dict[str, Any]]] = {}  # 取得済みRSSをフィードindexごとに保持
         self.current_feed_index: int = 0          # 現在表示中のフィードindex
         self.current_item_index: int = 0          # 現在表示中の記事index（当該フィード内）
         self.scroll_position: float = 0.0         # 説明文のスクロール位置（px）
-        self.last_rss_update: float = 0.0         # 最終RSS更新のエポック秒
-        self.article_start_time: float = 0.0      # 現記事の表示開始エポック秒（PAUSE判定や経過時間計算に使用）
+        self.article_start_time: float = 0.0      # 現記事の表示開始モノトニック秒（PAUSE判定や経過時間計算に使用）
         self.auto_scroll_paused: bool = True      # Trueの間は説明文スクロールを停止（PAUSE_AT_STARTで解除）
-        self.feed_switch_time: float = 0.0        # 直近のフィード切替時刻（中央通知の表示条件に利用）
+        self.feed_switch_time: float = 0.0        # 直近のフィード切替モノトニック秒（中央通知の表示条件に利用）
         self.loading_effect: int = 0              # ローディング演出の残カウンタ（0で非表示）
         self.transition_effect: float = 0.0       # 切替アニメの残フレーム量（>0の間はスライド描画）
         self.transition_direction: int = 1        # 切替方向（1:右へ／-1:左へ）アニメのオフセット符号に使用
+        self._prev_feed_index: int = 0            # 直前に表示していたフィード
+        self._prev_item_index: int = 0            # 直前に表示していた記事
 
         self.feed_cache: Dict[int, Deque[Dict[str, Any]]] = {
             idx: deque(maxlen=self.cache_settings.max_items)
@@ -251,7 +254,13 @@ class RSSReaderApp:
         # クリック検出（ポーリング方式に統一）
         self._prev_button_state = 1               # 直前のボタン状態（1:未押下, 0:押下）
         self._last_press_time = 0.0               # 直近の押下時刻（単/ダブルクリックの時間間隔判定に使用）
+        self._last_edge_time = 0.0                # 直近のエッジ時刻（チャタリング抑止）
         self._click_count = 0                     # クリック回数カウント（1=シングル, 2=ダブル）
+        self._press_start_time = 0.0              # ボタン押下開始時刻
+        self._long_press_handled = False          # 長押し処理済みフラグ
+        self._display_enabled = True              # True=表示点灯、False=消灯
+        self._display_blank_drawn = False         # 消灯時にブランクを描画済みか
+        self._user_agent = "SSD1309-RSS/1.7.1 (+https://github.com/)"  # RSS取得のUser-Agent
 
         # ロック（必要最小限）
         self._state_lock = threading.Lock()
@@ -261,10 +270,10 @@ class RSSReaderApp:
         self.scroll_position = 0.0
         self.transition_effect = self.TRANSITION_FRAMES
         self.transition_direction = transition_direction
-        self.article_start_time = time.time()
+        self.article_start_time = time.monotonic()
         self.auto_scroll_paused = True
         self._scroll_ease_elapsed = 0.0
-        self._last_scroll_time = time.time()
+        self._last_scroll_time = time.monotonic()
 
 # 1) 初期化処理
     # 初期化
@@ -274,12 +283,13 @@ class RSSReaderApp:
         self._init_gpio()
         self._init_display()
         self._install_signal_handlers()
-        self.article_start_time = time.time()
-        self.feed_switch_time = time.time() - 10  # 初回通知オフセット
-        self._last_main_update = time.time()
-        self._last_feed_switch_check = time.time()
-        self._last_rss_refresh_attempt = time.time()
-        self._last_scroll_time = time.time()
+        monotonic_now = time.monotonic()
+        self.article_start_time = monotonic_now
+        self.feed_switch_time = monotonic_now - 10  # 初回通知オフセット
+        self._last_main_update = monotonic_now
+        self._last_feed_switch_check = monotonic_now
+        self._last_rss_refresh_attempt = monotonic_now
+        self._last_scroll_time = monotonic_now
         self._scroll_ease_elapsed = 0.0
         self.scroll_position = 0.0
 
@@ -362,9 +372,11 @@ class RSSReaderApp:
 
         # リトライしながらRSS取得を試みる
         for attempt in range(1, total_attempts + 1):
-            self._last_rss_refresh_attempt = time.time()
+            self._last_rss_refresh_attempt = time.monotonic()
             try:
                 successes, errors = await self._fetch_rss_feed_async()
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 self.log.error(
                     f"RSS fetch error: {exc} (attempt {attempt}/{total_attempts})"
@@ -396,7 +408,10 @@ class RSSReaderApp:
     # 全フィードを並列で取得する
     async def _fetch_rss_feed_async(self) -> Tuple[Dict[int, List[Dict[str, Any]]], Dict[int, Exception]]:
         timeout = aiohttp.ClientTimeout(total=self.network_settings.timeout)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers={"User-Agent": self._user_agent},
+        ) as session:
             # 全フィードの取得タスクを並列実行
             tasks = [
                 self._fetch_single_feed(session, idx, feed_info)
@@ -424,6 +439,8 @@ class RSSReaderApp:
             if feed_info.get("type") == "text":
                 return await self._fetch_text_feed(session, idx, feed_info)
             return await self._fetch_rss_feed(session, idx, feed_info)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             self.log.error("Feed fetch failed for %s: %s", feed_info["title"], exc)
             return idx, None, exc
@@ -501,6 +518,7 @@ class RSSReaderApp:
         published: str = "",
         link: str = "",
     ) -> Dict[str, Any]:
+        title_lines = textwrap.wrap(title, width=20)
         return {
             "title": title,
             "description": description,
@@ -509,6 +527,8 @@ class RSSReaderApp:
             "feed_title": feed_info["title"],
             "feed_color": feed_info["color"],
             "feed_index": idx,
+            "title_lines": title_lines,
+            "desc_width": None,
         }
 
     @staticmethod
@@ -597,8 +617,7 @@ class RSSReaderApp:
         base_y: int,
         highlight_title: bool = False,
     ) -> int:
-        title = item["title"]
-        title_wrapped = textwrap.wrap(title, width=20)
+        title_wrapped = item.get("title_lines") or textwrap.wrap(item["title"], width=20)
         y_pos = base_y
         for i, line in enumerate(title_wrapped[:2]):
             if highlight_title:
@@ -623,9 +642,7 @@ class RSSReaderApp:
         draw.rectangle((base_x, y_pos, base_x + WIDTH - 4, y_pos + desc_background_height), fill=0)
         desc = item["description"].replace("\n", " ").strip()
         scroll_offset = int(self.scroll_position)
-        desc_x = base_x + WIDTH - scroll_offset
-        if self.auto_scroll_paused:
-            desc_x = base_x
+        desc_x = base_x if self.auto_scroll_paused else (base_x - scroll_offset)
         draw.text((desc_x, y_pos), desc, font=self.FONT, fill=1)
         return y_pos + desc_background_height
 
@@ -676,11 +693,14 @@ class RSSReaderApp:
             if self.news_items and self.current_feed_index in self.news_items and self.news_items[self.current_feed_index]:
                 item = self.news_items[self.current_feed_index][self.current_item_index]
                 self.draw_article_content(draw, item, 2 + offset, content_y)
-                prev_feed_idx = ((self.current_feed_index - 1) % len(self.rss_feeds)
-                                 if self.transition_direction > 0
-                                 else (self.current_feed_index + 1) % len(self.rss_feeds))
-                if prev_feed_idx in self.news_items and self.news_items[prev_feed_idx]:
-                    prev_item = self.news_items[prev_feed_idx][0]
+                prev_feed_idx = self._prev_feed_index
+                prev_item_idx = self._prev_item_index
+                if (
+                    prev_feed_idx in self.news_items
+                    and self.news_items[prev_feed_idx]
+                    and 0 <= prev_item_idx < len(self.news_items[prev_feed_idx])
+                ):
+                    prev_item = self.news_items[prev_feed_idx][prev_item_idx]
                     next_x = 2 + WIDTH * (-self.transition_direction) + offset
                     self.draw_article_content(draw, prev_item, next_x, content_y)
 
@@ -696,7 +716,7 @@ class RSSReaderApp:
             draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
 
         # フィード切替通知
-        if time.time() - self.feed_switch_time < 2.0:
+        if time.monotonic() - self.feed_switch_time < 2.0:
             self.draw_feed_notification(draw, self.rss_feeds[self.current_feed_index]["title"])
 
         return image
@@ -706,9 +726,13 @@ class RSSReaderApp:
     # 次のフィードへ切り替える
     def switch_feed(self):
         with self._state_lock:
+            prev_feed = self.current_feed_index
+            prev_item = self.current_item_index
             self.current_feed_index = (self.current_feed_index + 1) % len(self.rss_feeds)
             self.current_item_index = 0
-            self.feed_switch_time = time.time()
+            self._prev_feed_index = prev_feed
+            self._prev_item_index = prev_item
+            self.feed_switch_time = time.monotonic()
             self._reset_article_state(transition_direction=-1)
         self.log.info(f"Feed switched -> {self.rss_feeds[self.current_feed_index]['title']}")
 
@@ -718,10 +742,14 @@ class RSSReaderApp:
         with self._state_lock:
             if not self.news_items or self.current_feed_index not in self.news_items or not self.news_items[self.current_feed_index]:
                 return
+            prev_feed = self.current_feed_index
+            prev_item = self.current_item_index
             if self.current_item_index < len(self.news_items[self.current_feed_index]) - 1:
                 self.current_item_index += 1
             else:
                 self.current_item_index = 0
+            self._prev_feed_index = prev_feed
+            self._prev_item_index = prev_item
             self._reset_article_state(transition_direction=-1)
 
     # 前の記事へ（関数の呼び出しが掛かってないので、必要に応じてGPIOボタンなどに割り当てるなどをしてください）
@@ -730,10 +758,14 @@ class RSSReaderApp:
         with self._state_lock:
             if not self.news_items or self.current_feed_index not in self.news_items or not self.news_items[self.current_feed_index]:
                 return
+            prev_feed = self.current_feed_index
+            prev_item = self.current_item_index
             if self.current_item_index > 0:
                 self.current_item_index -= 1
             else:
                 self.current_item_index = len(self.news_items[self.current_feed_index]) - 1
+            self._prev_feed_index = prev_feed
+            self._prev_item_index = prev_item
             self._reset_article_state(transition_direction=1)
 
 
@@ -752,7 +784,7 @@ class RSSReaderApp:
         # 記事と経過時間の取得（ロック下）
         with self._state_lock:
             item = self.news_items[self.current_feed_index][self.current_item_index]
-            current_time = time.time()
+            current_time = time.monotonic()
             elapsed_time = current_time - self.article_start_time
 
             # 表示開始直後は一時停止（PAUSE_AT_START 秒）
@@ -765,7 +797,10 @@ class RSSReaderApp:
 
             # 説明文の幅を計測
             desc = item["description"].replace("\n", " ").strip()
-            desc_width = self.get_text_width(desc, self.FONT) if desc else 0
+            desc_width = item.get("desc_width")
+            if desc_width is None:
+                desc_width = self.get_text_width(desc, self.FONT) if desc else 0
+                item["desc_width"] = desc_width
 
             # 短文（スクロール不要）は ARTICLE_DISPLAY_TIME 経過で次記事へ
             short_text = desc_width <= (WIDTH - 4)
@@ -776,7 +811,7 @@ class RSSReaderApp:
                 self.move_to_next_article()
             return
 
-        now = time.time()
+        now = time.monotonic()
         delta_time = now - self._last_scroll_time if self._last_scroll_time else self.MAIN_UPDATE_INTERVAL
         self._last_scroll_time = now
         self._scroll_ease_elapsed = min(
@@ -820,13 +855,32 @@ class RSSReaderApp:
         while not self._stop_event.is_set():
             try:
                 state = GPIO.input(BUTTON_FEED)
-                now = time.time()
+                now = time.monotonic()
                 if self._prev_button_state == 1 and state == 0:
-                    if now - self._last_press_time <= self.DOUBLE_CLICK_INTERVAL:
-                        self._click_count += 1
+                    if now - self._last_edge_time < self._debounce_sec:
+                        self._prev_button_state = state
+                        await asyncio.sleep(self.GPIO_POLL_INTERVAL)
+                        continue
+                    self._last_edge_time = now
+                    self._press_start_time = now
+                    self._long_press_handled = False
+
+                if state == 0 and not self._long_press_handled:
+                    if now - self._press_start_time >= self.LONG_PRESS_INTERVAL:
+                        self._set_display_enabled(not self._display_enabled)
+                        self._long_press_handled = True
+                        self._click_count = 0
+                        self._last_press_time = 0.0
+
+                if self._prev_button_state == 0 and state == 1:
+                    if not self._long_press_handled:
+                        if now - self._last_press_time <= self.DOUBLE_CLICK_INTERVAL:
+                            self._click_count += 1
+                        else:
+                            self._click_count = 1
+                        self._last_press_time = now
                     else:
-                        self._click_count = 1
-                    self._last_press_time = now
+                        self._click_count = 0
 
                 if self._click_count > 0 and (now - self._last_press_time) > self.DOUBLE_CLICK_INTERVAL:
                     if self._click_count == 1:
@@ -839,6 +893,8 @@ class RSSReaderApp:
 
                 self._prev_button_state = state
                 await asyncio.sleep(self.GPIO_POLL_INTERVAL)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 self.log.error(f"GPIO polling error: {e}")
                 await asyncio.sleep(0.1)
@@ -857,6 +913,9 @@ class RSSReaderApp:
     def _signal_handler(self, sig, frame) -> None:
         self.log.info("Exiting...")
         self._stop_event.set()
+
+    # 終了時のクリーンアップ処理
+    def _cleanup(self) -> None:
         try:
             import RPi.GPIO as GPIO
             GPIO.cleanup()
@@ -868,7 +927,24 @@ class RSSReaderApp:
                 self.display.display(blank)
             except Exception:
                 pass
-        sys.exit(0)
+
+    def _set_display_enabled(self, enabled: bool) -> None:
+        if self._display_enabled == enabled:
+            return
+        self._display_enabled = enabled
+        self._display_blank_drawn = False
+        state = "on" if enabled else "off"
+        self.log.info("Display toggled %s", state)
+
+    def _draw_blank_display(self) -> None:
+        if not self.display or self._display_blank_drawn:
+            return
+        blank = Image.new("1", (WIDTH, HEIGHT), 0)
+        try:
+            self.display.display(blank)
+            self._display_blank_drawn = True
+        except Exception:
+            pass
 
 # 5) メインループ
     # メインループ
@@ -888,11 +964,12 @@ class RSSReaderApp:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            self._cleanup()
 
     # メインループで更新処理を繰り返す
     async def _main_loop(self) -> None:
         while not self._stop_event.is_set():
-            now = time.time()
+            now = time.monotonic()
 
             # 表示時間外は待機してループを続ける
             if await self._handle_display_window():
@@ -910,10 +987,16 @@ class RSSReaderApp:
         if now - self._last_main_update < self.MAIN_UPDATE_INTERVAL:
             return
 
+        if not self._display_enabled:
+            self._draw_blank_display()
+            self._last_main_update = now
+            return
+
         self.update_scroll_position()
         image = self.draw_rss_screen()
         try:
             self.display.display(image)
+            self._display_blank_drawn = False
         except Exception as e:
             self.log.warning(f"OLED display error: {e}")
         self._last_main_update = now
@@ -940,6 +1023,15 @@ class RSSReaderApp:
 
     # 表示時間外の待機処理を行う
     async def _handle_display_window(self) -> bool:
+        if not self._display_enabled:
+            self._draw_blank_display()
+            await asyncio.sleep(self.display_settings.sleep_interval)
+            current = time.monotonic()
+            self._last_main_update = current
+            self._last_scroll_time = current
+            self._last_feed_switch_check = current
+            return True
+
         if self.is_display_time():
             return False
 
@@ -954,7 +1046,7 @@ class RSSReaderApp:
             pass
 
         await asyncio.sleep(self.display_settings.sleep_interval)
-        current = time.time()
+        current = time.monotonic()
         self._last_main_update = current
         self._last_scroll_time = current
         self._last_feed_switch_check = current
@@ -969,13 +1061,17 @@ async def main() -> None:
         await app.run()
     except KeyboardInterrupt:
         app._signal_handler(None, None)
+        app._cleanup()
     except Exception as e:
         # ここは最上位キャッチ。ログして安全終了
         logging.getLogger("rss_oled").error(f"Fatal error: {e}")
         app._signal_handler(None, None)
+        app._cleanup()
+
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
