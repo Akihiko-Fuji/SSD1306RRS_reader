@@ -724,7 +724,7 @@ class RSSReaderApp:
             draw.text(((WIDTH - msg_width) // 2, HEIGHT // 2 - 6), message, font=self.FONT, fill=1)
 
         # フィード切替通知
-        if time.monotonic() - self.feed_switch_time < 2.0:␊
+        if time.monotonic() - self.feed_switch_time < 2.0:
             self.draw_feed_notification(draw, self.rss_feeds[feed_idx]["title"])
 
         return image
@@ -1081,6 +1081,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
